@@ -88,6 +88,18 @@ class EconomicEvent(Base):
     impact_level = Column(String(20))
 
 
+class SocialSentiment(Base):
+    __tablename__ = "social_sentiment"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date)
+    ticker = Column(String(10))
+    headline = Column(Text)
+    source = Column(String(100))
+    url = Column(Text)
+    sentiment_score = Column(Float)
+    post_length = Column(Integer)
+
+
 # ---------------------------------------------------------------------------
 # Company lookup data
 # ---------------------------------------------------------------------------
@@ -144,6 +156,12 @@ CSV_MAP = [
     {
         "file": "economic_events.csv",
         "model": EconomicEvent,
+        "rename": None,
+        "date_col": "date",
+    },
+    {
+        "file": "social_sentiment.csv",
+        "model": SocialSentiment,
         "rename": None,
         "date_col": "date",
     },

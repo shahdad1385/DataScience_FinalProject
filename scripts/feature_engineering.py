@@ -338,6 +338,54 @@ def add_sentiment_features():
 
 
 # ---------------------------------------------------------------------------
+# Social sentiment features — per-ticker daily aggregates
+# ---------------------------------------------------------------------------
+def add_social_sentiment_features():
+    print("📱 Adding features to social_sentiment...")
+
+    features = [
+        ("daily_avg_sentiment", "REAL"),
+        ("daily_sentiment_std", "REAL"),
+        ("daily_post_count", "INTEGER"),
+        ("ticker_daily_avg", "REAL"),
+        ("ticker_sentiment_volatility", "REAL"),
+    ]
+    add_columns_if_missing("social_sentiment", features)
+
+    try:
+        df = pd.read_sql("SELECT id, date, ticker, sentiment_score FROM social_sentiment", engine)
+    except Exception:
+        print("    No social_sentiment table found, skipping.")
+        return
+    if df.empty:
+        print("    No data, skipping.")
+        return
+    df["date"] = pd.to_datetime(df["date"])
+
+    # Daily aggregates (across all tickers)
+    daily_stats = df.groupby("date").agg(
+        daily_avg_sentiment=("sentiment_score", "mean"),
+        daily_sentiment_std=("sentiment_score", "std"),
+        daily_post_count=("sentiment_score", "count"),
+    ).reset_index()
+    df = df.merge(daily_stats, on="date", how="left")
+
+    # Per-ticker daily average
+    ticker_daily = df.dropna(subset=["ticker"]).groupby(["date", "ticker"])["sentiment_score"].agg(
+        ticker_daily_avg="mean",
+        ticker_sentiment_volatility="std",
+    ).reset_index()
+    df = df.merge(ticker_daily, on=["date", "ticker"], how="left")
+
+    updates = df[["id", "daily_avg_sentiment", "daily_sentiment_std", "daily_post_count",
+                   "ticker_daily_avg", "ticker_sentiment_volatility"]].copy()
+    updates = updates.where(pd.notnull(updates), None)
+    batch_update("social_sentiment", updates)
+
+    print(f"    Updated {len(df):,} rows")
+
+
+# ---------------------------------------------------------------------------
 # Economic event features — earnings proximity, event flags
 # ---------------------------------------------------------------------------
 def add_economic_event_features():
@@ -404,6 +452,7 @@ if __name__ == "__main__":
     add_indicator_features()
     add_news_features()
     add_sentiment_features()
+    add_social_sentiment_features()
     add_economic_event_features()
     print(f"\n{'=' * 50}")
     print("All features added to database!")

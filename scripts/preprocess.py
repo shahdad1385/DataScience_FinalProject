@@ -264,6 +264,33 @@ def preprocess_news(cutoff1, cutoff2):
     save_split(train_df, val_df, test_df, "news")
 
 
+def preprocess_social_sentiment(cutoff1, cutoff2):
+    print("\n--- social_sentiment ---")
+    try:
+        df = pd.read_sql("SELECT * FROM social_sentiment ORDER BY date", engine, parse_dates=["date"])
+    except Exception:
+        print("  Table not found, skipping.")
+        return
+    if df.empty:
+        print("  No data, skipping.")
+        return
+    print(f"  Loaded: {len(df):,} rows, {df.shape[1]} cols")
+
+    train_df, val_df, test_df = apply_split(df, cutoff1, cutoff2)
+    print(f"  Train: {len(train_df):,} | Val: {len(val_df):,} | Test: {len(test_df):,}")
+
+    numeric_cols = train_df.select_dtypes(include=[np.number]).columns.tolist()
+    numeric_cols = [c for c in numeric_cols if c != "id"]
+
+    print("  Null handling:")
+    train_df, val_df, test_df = handle_nulls(train_df, val_df, test_df, numeric_cols)
+
+    print("  Normalizing:")
+    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols)
+
+    save_split(train_df, val_df, test_df, "social_sentiment")
+
+
 def preprocess_news_sentiment(cutoff1, cutoff2):
     print("\n--- news_sentiment ---")
     try:
@@ -307,6 +334,7 @@ def run_preprocessing():
     preprocess_market_indicators(cutoff1, cutoff2)
     preprocess_news(cutoff1, cutoff2)
     preprocess_news_sentiment(cutoff1, cutoff2)
+    preprocess_social_sentiment(cutoff1, cutoff2)
     preprocess_economic_events(cutoff1, cutoff2)
 
     print(f"\n{'=' * 50}")
