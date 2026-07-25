@@ -30,6 +30,15 @@ TARGET_KEYWORDS = [
     "power", "grid", "electricity", "energy", "utility", "utilities",
     "infrastructure", "server", "rack",
     "supply chain", "foundry", "fab",
+    "openai", "anthropic", "claude", "chatgpt", "gpt-4", "gpt-5",
+    "deepseek", "gemini", "llama", "mistral", "transformer",
+    "large language model", "llm", "generative ai", "gen ai",
+    "robotics", "autonomous", "self-driving",
+    "ram", "memory", "hbm", "dram",
+    "broadcom", "qualcomm", "micron", "marvell", "asml", "arm",
+    "super micro", "smci", "vertiv", "modine",
+    "cerebras", "graphcore", "sambanova", "groq",
+    "meta ai", "google ai", "microsoft ai", "amazon ai",
 ]
 
 # ---------------------------------------------------------------------------
@@ -120,34 +129,70 @@ SOURCES = [
         "categories": ["yahoo", "finance"],
     },
     {
-        "name": "Reddit r/wallstreetbets",
-        "type": "reddit_rss",
-        "url": "https://www.reddit.com/r/wallstreetbets/.rss",
-        "categories": ["reddit", "market-sentiment"],
+        "name": "Reddit",
+        "type": "google_news_rss",
+        "queries": [
+            "site:reddit.com nvidia stock",
+            "site:reddit.com amd semiconductor",
+            "site:reddit.com intel chip stock",
+            "site:reddit.com tsmc semiconductor",
+            "site:reddit.com AI data center",
+            "site:reddit.com gpu chip stock",
+            "site:reddit.com nvidia earnings",
+            "site:reddit.com semiconductor supply chain",
+            "site:reddit.com broadcom qualcomm stock",
+            "site:reddit.com micron smci stock",
+            "site:reddit.com asml chip foundry",
+            "site:reddit.com vertiv modine data center",
+            "site:reddit.com openai anthropic AI",
+            "site:reddit.com deepseek AI model",
+            "site:reddit.com AI chip semiconductor",
+            "site:reddit.com hbm memory dram stock",
+            "site:reddit.com AI investing stock",
+            "site:reddit.com nvidia gpu demand",
+            "site:reddit.com data center power energy",
+            "site:reddit.com semiconductor stocks",
+        ],
+        "categories": ["reddit", "market-sentiment", "social"],
     },
     {
-        "name": "Reddit r/nvidia",
-        "type": "reddit_rss",
-        "url": "https://www.reddit.com/r/nvidia/.rss",
-        "categories": ["reddit", "nvidia", "gpu"],
+        "name": "Twitter/X",
+        "type": "google_news_rss",
+        "queries": [
+            "site:x.com nvidia stock",
+            "site:x.com amd semiconductor",
+            "site:x.com tsmc chip",
+            "site:x.com AI data center",
+            "site:x.com intel stock",
+            "site:x.com gpu chip",
+            "site:twitter.com nvidia earnings",
+            "site:twitter.com semiconductor stock",
+            "site:x.com broadcom qualcomm",
+            "site:x.com micron stock",
+            "site:x.com openai anthropic AI",
+            "site:x.com deepseek AI",
+            "site:x.com AI chip hbm memory",
+            "site:x.com smci super micro stock",
+            "site:x.com asml arm semiconductor",
+        ],
+        "categories": ["twitter", "market-sentiment", "social"],
     },
     {
-        "name": "Reddit r/semiconductors",
-        "type": "reddit_rss",
-        "url": "https://www.reddit.com/r/semiconductors/.rss",
-        "categories": ["reddit", "semiconductor"],
-    },
-    {
-        "name": "Reddit r/hardware",
-        "type": "reddit_rss",
-        "url": "https://www.reddit.com/r/hardware/.rss",
-        "categories": ["reddit", "hardware"],
-    },
-    {
-        "name": "Reddit r/technology",
-        "type": "reddit_rss",
-        "url": "https://www.reddit.com/r/technology/.rss",
-        "categories": ["reddit", "technology"],
+        "name": "AI Companies",
+        "type": "google_news_rss",
+        "queries": [
+            "openai gpt model release announcement",
+            "anthropic claude model announcement",
+            "deepseek AI model china",
+            "google gemini AI model update",
+            "meta llama AI open source",
+            "nvidia AI chip GPU announcement",
+            "AI startup funding semiconductor",
+            "AI model training infrastructure",
+            "openai data center energy",
+            "anthropic scaling AI safety",
+        ],
+        "categories": ["ai-companies", "technology", "ai"],
     },
 ]
 
@@ -388,9 +433,18 @@ def deduplicate(articles):
 # ---------------------------------------------------------------------------
 # Main pipeline — produces TWO outputs:
 #   1. ai_infrastructure_news.csv  (official news only)
-#   2. social_media_posts.csv      (Reddit posts only, short titles)
+#   2. social_media_posts.csv      (Reddit no keyword filter, Twitter with keywords)
 # ---------------------------------------------------------------------------
-REDDIT_MAX_TITLE_LEN = 150  # skip long Reddit rants
+SOCIAL_MAX_TITLE_LEN = 200  # skip very long posts
+DATASET_START_DATE = "2018-01-01"  # match stock data start
+
+
+def _is_reddit_source(source_name):
+    return "reddit" in str(source_name).lower()
+
+
+def _is_twitter_source(source_name):
+    return "x.com" in str(source_name).lower() or "twitter" in str(source_name).lower()
 
 
 def collect_all():
@@ -406,9 +460,16 @@ def collect_all():
         articles = fetcher(source)
         print(f"  -> {len(articles)} raw articles")
 
-        if source["type"] == "reddit_rss":
-            social_articles.extend(articles)
-            time.sleep(4)
+        # Tag each article with its source's categories
+        for a in articles:
+            a["_is_social"] = any(
+                cat in source.get("categories", [])
+                for cat in ("reddit", "twitter", "social")
+            )
+
+        if any(a.get("_is_social") for a in articles):
+            social_articles.extend([a for a in articles if a.get("_is_social")])
+            time.sleep(1)
         else:
             official_articles.extend(articles)
 
@@ -423,21 +484,39 @@ def collect_all():
         df_official = df_official[mask].copy()
     print(f"After keyword filter: {len(df_official)}")
 
-    print(f"\n--- Social media (Reddit) ---")
+    print(f"\n--- Social media (Reddit + Twitter) ---")
     print(f"Total raw: {len(social_articles)}")
     social_articles = deduplicate(social_articles)
     print(f"After dedup: {len(social_articles)}")
 
     df_social = pd.DataFrame(social_articles)
     if not df_social.empty:
-        # Keyword filter
-        mask = df_social.apply(lambda row: matches_keywords(row, TARGET_KEYWORDS), axis=1)
-        df_social = df_social[mask].copy()
-        # Keep only short posts (title-based, no long rants)
-        df_social = df_social[df_social["headline"].str.len() <= REDDIT_MAX_TITLE_LEN].copy()
-        # Clear summaries — Reddit posts don't have article summaries
+        # Reddit: no keyword filter (subreddit already filters topic)
+        # Twitter: apply keyword filter (no topic filtering on Twitter)
+        reddit_mask = df_social["source"].apply(_is_reddit_source)
+        twitter_mask = df_social["source"].apply(_is_twitter_source)
+        keyword_mask = df_social.apply(lambda row: matches_keywords(row, TARGET_KEYWORDS), axis=1)
+
+        # Reddit: keep all (no keyword filter), just length + noise filter
+        # Twitter: must match keywords
+        keep_mask = (reddit_mask & pd.Series(True, index=df_social.index)) | (twitter_mask & keyword_mask)
+        df_social = df_social[keep_mask].copy()
+
+        # Keep only short posts
+        df_social = df_social[df_social["headline"].str.len() <= SOCIAL_MAX_TITLE_LEN].copy()
+        # Clear summaries
         df_social["summary"] = None
-    print(f"After filter (keywords + short title <= {REDDIT_MAX_TITLE_LEN} chars): {len(df_social)}")
+        # Remove noise: career/interview/job hunting posts
+        noise_patterns = [
+            "interview", "advice", "looking for", "any insight", "any advices",
+            "any tips", "thank you", "regards", "help me", "how to get",
+            "recommend checking", "final year", "student here",
+        ]
+        def _is_noise(title):
+            t = str(title).lower()
+            return any(p in t for p in noise_patterns)
+        df_social = df_social[~df_social["headline"].apply(_is_noise)].copy()
+    print(f"After filter (reddit-all + twitter-keywords + short + no noise): {len(df_social)}")
 
     # Sort both
     df_official.sort_values("date", ascending=False, inplace=True)
