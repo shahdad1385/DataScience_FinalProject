@@ -249,19 +249,23 @@ def add_indicator_features():
 
 
 # ---------------------------------------------------------------------------
-# News features — per-row + daily aggregates, writes back to DB
+# News features (merged news table) — headline_len + daily aggregates
 # ---------------------------------------------------------------------------
 def add_news_features():
-    print("📰 Adding features to news_articles...")
+    print("📰 Adding features to news...")
 
     features = [
         ("headline_len", "INTEGER"),
         ("daily_article_count", "INTEGER"),
         ("daily_source_count", "INTEGER"),
+        ("ticker_daily_count", "INTEGER"),
     ]
-    add_columns_if_missing("news_articles", features)
+    add_columns_if_missing("news", features)
 
-    df = pd.read_sql("SELECT id, date, headline, source FROM news_articles", engine)
+    df = pd.read_sql("SELECT id, date, headline, source, ticker FROM news", engine)
+    if df.empty:
+        print("    No news data found, skipping.")
+        return
     df["date"] = pd.to_datetime(df["date"])
     df["headline_len"] = df["headline"].str.len()
 
@@ -269,37 +273,15 @@ def add_news_features():
     daily_sources = df.groupby("date")["source"].nunique().rename("daily_source_count")
     df = df.join(daily_counts, on="date").join(daily_sources, on="date")
 
-    updates = df[["id", "headline_len", "daily_article_count", "daily_source_count"]].copy()
+    # Per-ticker daily count (null for industry news)
+    ticker_counts = df[df["ticker"].notna()].groupby(["date", "ticker"]).size().rename("ticker_daily_count")
+    df = df.merge(ticker_counts, on=["date", "ticker"], how="left")
+
+    updates = df[["id", "headline_len", "daily_article_count", "daily_source_count", "ticker_daily_count"]].copy()
     updates = updates.where(pd.notnull(updates), None)
-    batch_update("news_articles", updates)
+    batch_update("news", updates)
 
-    print(f"    ✅ Updated {len(df):,} rows")
-
-
-# ---------------------------------------------------------------------------
-# HF news features — per-row + daily counts, writes back to DB
-# ---------------------------------------------------------------------------
-def add_hf_features():
-    print("📚 Adding features to hf_news...")
-
-    features = [
-        ("headline_len", "INTEGER"),
-        ("daily_article_count", "INTEGER"),
-    ]
-    add_columns_if_missing("hf_news", features)
-
-    df = pd.read_sql("SELECT id, date, headline FROM hf_news", engine)
-    df["date"] = pd.to_datetime(df["date"])
-    df["headline_len"] = df["headline"].str.len()
-
-    daily_counts = df.groupby("date").size().rename("daily_article_count")
-    df = df.join(daily_counts, on="date")
-
-    updates = df[["id", "headline_len", "daily_article_count"]].copy()
-    updates = updates.where(pd.notnull(updates), None)
-    batch_update("hf_news", updates)
-
-    print(f"    ✅ Updated {len(df):,} rows")
+    print(f"    Updated {len(df):,} rows")
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +345,6 @@ if __name__ == "__main__":
     add_stock_features()
     add_indicator_features()
     add_news_features()
-    add_hf_features()
     add_sentiment_features()
     print(f"\n{'=' * 50}")
     print("All features added to database!")

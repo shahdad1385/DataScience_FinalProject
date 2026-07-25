@@ -35,26 +35,20 @@ class MarketIndicator(Base):
     ticker = Column(String(20))
 
 
-class NewsArticle(Base):
-    __tablename__ = "news_articles"
+class News(Base):
+    """Merged news table — combines industry news (news_articles) and
+    ticker-specific news (hf_news) into one unified table."""
+    __tablename__ = "news"
     id = Column(Integer, primary_key=True, autoincrement=True)
     date = Column(Date)
     headline = Column(Text)
     summary = Column(Text)
     url = Column(Text)
     source = Column(String(100))
+    ticker = Column(String(10))
     source_categories = Column(String(200))
     tags = Column(Text)
-
-
-class HFNews(Base):
-    __tablename__ = "hf_news"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    date = Column(Date)
-    headline = Column(Text)
-    source = Column(String(100))
-    ticker = Column(String(10))
-    url = Column(Text)
+    llm_summary = Column(Text)
 
 
 class NewsSentiment(Base):
@@ -112,7 +106,7 @@ COMPANIES = [
 
 
 # ---------------------------------------------------------------------------
-# CSV-to-table mapping
+# CSV-to-table mapping (non-news tables)
 # ---------------------------------------------------------------------------
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data_samples")
 
@@ -129,18 +123,6 @@ CSV_MAP = [
         "model": MarketIndicator,
         "rename": {"Date": "date", "Open": "open", "High": "high", "Low": "low",
                     "Close": "close", "Volume": "volume", "Indicator": "indicator", "Ticker": "ticker"},
-        "date_col": "date",
-    },
-    {
-        "file": "ai_infrastructure_news.csv",
-        "model": NewsArticle,
-        "rename": None,
-        "date_col": "date",
-    },
-    {
-        "file": "hf_financial_news.csv",
-        "model": HFNews,
-        "rename": None,
         "date_col": "date",
     },
     {
@@ -178,6 +160,53 @@ def load_csv_to_table(csv_info, session):
     return len(records)
 
 
+def load_merged_news(session):
+    """Load both news CSVs into the unified 'news' table."""
+    total = 0
+
+    # Load industry news (news_articles CSV)
+    news_path = os.path.join(DATA_DIR, "ai_infrastructure_news.csv")
+    if os.path.exists(news_path):
+        df_news = pd.read_csv(news_path)
+        df_news["date"] = pd.to_datetime(df_news["date"], errors="coerce").dt.date
+        df_news["ticker"] = None  # Industry news has no specific ticker
+        df_news["llm_summary"] = None
+        df_news = df_news.where(pd.notnull(df_news), None)
+
+        cols = ["date", "headline", "summary", "url", "source", "ticker",
+                "source_categories", "tags", "llm_summary"]
+        cols = [c for c in cols if c in df_news.columns]
+
+        for _, row in df_news[cols].iterrows():
+            session.add(News(**row.to_dict()))
+        session.commit()
+        print(f"  ai_infrastructure_news.csv: {len(df_news):,} rows")
+        total += len(df_news)
+
+    # Load ticker-specific news (hf_news CSV)
+    hf_path = os.path.join(DATA_DIR, "hf_financial_news.csv")
+    if os.path.exists(hf_path):
+        df_hf = pd.read_csv(hf_path)
+        df_hf["date"] = pd.to_datetime(df_hf["date"], errors="coerce").dt.date
+        df_hf["summary"] = None
+        df_hf["source_categories"] = None
+        df_hf["tags"] = None
+        df_hf["llm_summary"] = None
+        df_hf = df_hf.where(pd.notnull(df_hf), None)
+
+        cols = ["date", "headline", "summary", "url", "source", "ticker",
+                "source_categories", "tags", "llm_summary"]
+        cols = [c for c in cols if c in df_hf.columns]
+
+        for _, row in df_hf[cols].iterrows():
+            session.add(News(**row.to_dict()))
+        session.commit()
+        print(f"  hf_financial_news.csv: {len(df_hf):,} rows")
+        total += len(df_hf)
+
+    return total
+
+
 def create_database():
     print("  Creating SQLite database...\n")
 
@@ -199,13 +228,19 @@ def create_database():
     session.commit()
     print(f"   {len(COMPANIES)} companies loaded")
 
-    # Load CSVs
+    # Load non-news CSVs
     total = 0
     for csv_info in CSV_MAP:
         print(f"Loading {csv_info['file']}...")
         count = load_csv_to_table(csv_info, session)
         total += count
         print(f"   {count:,} rows inserted")
+
+    # Load merged news
+    print("Loading news (merged)...")
+    news_count = load_merged_news(session)
+    total += news_count
+    print(f"   {news_count:,} rows inserted")
 
     session.close()
 

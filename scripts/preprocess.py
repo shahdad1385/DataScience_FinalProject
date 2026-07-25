@@ -237,9 +237,16 @@ def preprocess_market_indicators(cutoff1, cutoff2):
     save_split(train_df, val_df, test_df, "market_indicators")
 
 
-def preprocess_news_articles(cutoff1, cutoff2):
-    print("\n--- news_articles ---")
-    df = pd.read_sql("SELECT * FROM news_articles ORDER BY date", engine, parse_dates=["date"])
+def preprocess_news(cutoff1, cutoff2):
+    print("\n--- news (merged) ---")
+    try:
+        df = pd.read_sql("SELECT * FROM news ORDER BY date", engine, parse_dates=["date"])
+    except Exception:
+        print("  Table not found, skipping.")
+        return
+    if df.empty:
+        print("  No data, skipping.")
+        return
     print(f"  Loaded: {len(df):,} rows, {df.shape[1]} cols")
 
     train_df, val_df, test_df = apply_split(df, cutoff1, cutoff2)
@@ -254,27 +261,7 @@ def preprocess_news_articles(cutoff1, cutoff2):
     print("  Normalizing:")
     train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols)
 
-    save_split(train_df, val_df, test_df, "news_articles")
-
-
-def preprocess_hf_news(cutoff1, cutoff2):
-    print("\n--- hf_news ---")
-    df = pd.read_sql("SELECT * FROM hf_news ORDER BY date", engine, parse_dates=["date"])
-    print(f"  Loaded: {len(df):,} rows, {df.shape[1]} cols")
-
-    train_df, val_df, test_df = apply_split(df, cutoff1, cutoff2)
-    print(f"  Train: {len(train_df):,} | Val: {len(val_df):,} | Test: {len(test_df):,}")
-
-    numeric_cols = train_df.select_dtypes(include=[np.number]).columns.tolist()
-    numeric_cols = [c for c in numeric_cols if c != "id"]
-
-    print("  Null handling:")
-    train_df, val_df, test_df = handle_nulls(train_df, val_df, test_df, numeric_cols)
-
-    print("  Normalizing:")
-    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols)
-
-    save_split(train_df, val_df, test_df, "hf_news")
+    save_split(train_df, val_df, test_df, "news")
 
 
 def preprocess_news_sentiment(cutoff1, cutoff2):
@@ -318,8 +305,7 @@ def run_preprocessing():
 
     preprocess_stock_prices(cutoff1, cutoff2)
     preprocess_market_indicators(cutoff1, cutoff2)
-    preprocess_news_articles(cutoff1, cutoff2)
-    preprocess_hf_news(cutoff1, cutoff2)
+    preprocess_news(cutoff1, cutoff2)
     preprocess_news_sentiment(cutoff1, cutoff2)
 
     print(f"\n{'=' * 50}")
