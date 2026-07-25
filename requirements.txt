@@ -18,3 +18,5 @@ holidays>=0.30
 scipy>=1.10.0
 scrapling>=0.3.0
 vaderSentiment>=3.3.2
+google-generativeai>=0.8.0
+python-dotenv>=1.0.0
