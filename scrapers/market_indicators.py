@@ -22,6 +22,7 @@ INDICATORS = {
     "Crude_Oil": "CL=F",
     "Natural_Gas": "NG=F",
     "Fed_Funds_Rate": "^IRX",
+    "VIX_3M": "^VIX3M",
 }
 
 START_DATE = "2018-01-01"
