@@ -83,6 +83,7 @@ def handle_nulls(train_df, val_df, test_df, numeric_cols, group_col=None):
         val_df = val_df.drop(columns=[c for c in drop_cols if c in val_df.columns])
         test_df = test_df.drop(columns=[c for c in drop_cols if c in test_df.columns])
         null_cols = [c for c in null_cols if c not in drop_cols]
+        numeric_cols = [c for c in numeric_cols if c not in drop_cols]
 
     for col in null_cols:
         predictors = get_predictor_cols(train_df, col, numeric_cols)

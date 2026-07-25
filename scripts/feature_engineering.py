@@ -431,7 +431,7 @@ def add_economic_event_features():
         df.loc[idx, "is_dividend_week"] = (g["event_type"] == "dividend").astype(int)
 
         # Events this month (rolling count)
-        monthly = g.set_index("date").resample("M").size()
+        monthly = g.set_index("date").resample("ME").size()
         monthly_counts = monthly.reindex(g["date"], method="ffill")
         df.loc[idx, "events_this_month"] = monthly_counts.values
 
