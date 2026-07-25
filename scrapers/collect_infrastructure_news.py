@@ -213,7 +213,7 @@ def fetch_rss(source):
         articles.append({
             "date": date,
             "headline": title,
-            "summary": summary[:500],
+            "summary": summary[:2000],
             "url": link,
             "source": source["name"],
             "source_categories": ",".join(source["categories"]),
@@ -321,7 +321,7 @@ def fetch_google_news_rss(source):
             articles.append({
                 "date": date,
                 "headline": title,
-                "summary": summary[:500],
+                "summary": summary[:2000],
                 "url": link,
                 "source": publisher_name if publisher_name else source["name"],
                 "source_categories": ",".join(source["categories"]),
@@ -347,7 +347,7 @@ def fetch_reddit_rss(source):
             articles.append({
                 "date": date,
                 "headline": title,
-                "summary": summary[:500],
+                "summary": summary[:2000],
                 "url": link,
                 "source": source["name"],
                 "source_categories": ",".join(source["categories"]),
@@ -386,49 +386,78 @@ def deduplicate(articles):
 
 
 # ---------------------------------------------------------------------------
-# Main pipeline
+# Main pipeline — produces TWO outputs:
+#   1. ai_infrastructure_news.csv  (official news only)
+#   2. social_media_posts.csv      (Reddit posts only, short titles)
 # ---------------------------------------------------------------------------
+REDDIT_MAX_TITLE_LEN = 150  # skip long Reddit rants
+
+
 def collect_all():
     print("Multi-Source AI Infrastructure News Collector\n")
     print(f"Scrapling available: {HAS_SCRAPLING}\n")
-    all_articles = []
+
+    official_articles = []
+    social_articles = []
 
     for source in SOURCES:
         print(f"Fetching from {source['name']} ({source['type']})...")
         fetcher = FETCHERS[source["type"]]
         articles = fetcher(source)
         print(f"  -> {len(articles)} raw articles")
-        all_articles.extend(articles)
+
         if source["type"] == "reddit_rss":
+            social_articles.extend(articles)
             time.sleep(4)
+        else:
+            official_articles.extend(articles)
 
-    print(f"\nTotal raw articles collected: {len(all_articles)}")
+    print(f"\n--- Official news ---")
+    print(f"Total raw: {len(official_articles)}")
+    official_articles = deduplicate(official_articles)
+    print(f"After dedup: {len(official_articles)}")
 
-    all_articles = deduplicate(all_articles)
-    print(f"After deduplication: {len(all_articles)}")
+    df_official = pd.DataFrame(official_articles)
+    if not df_official.empty:
+        mask = df_official.apply(lambda row: matches_keywords(row, TARGET_KEYWORDS), axis=1)
+        df_official = df_official[mask].copy()
+    print(f"After keyword filter: {len(df_official)}")
 
-    df_all = pd.DataFrame(all_articles)
+    print(f"\n--- Social media (Reddit) ---")
+    print(f"Total raw: {len(social_articles)}")
+    social_articles = deduplicate(social_articles)
+    print(f"After dedup: {len(social_articles)}")
 
-    mask = df_all.apply(lambda row: matches_keywords(row, TARGET_KEYWORDS), axis=1)
-    df_filtered = df_all[mask].copy()
-    print(f"After keyword filtering: {len(df_filtered)}")
+    df_social = pd.DataFrame(social_articles)
+    if not df_social.empty:
+        # Keyword filter
+        mask = df_social.apply(lambda row: matches_keywords(row, TARGET_KEYWORDS), axis=1)
+        df_social = df_social[mask].copy()
+        # Keep only short posts (title-based, no long rants)
+        df_social = df_social[df_social["headline"].str.len() <= REDDIT_MAX_TITLE_LEN].copy()
+        # Clear summaries — Reddit posts don't have article summaries
+        df_social["summary"] = None
+    print(f"After filter (keywords + short title <= {REDDIT_MAX_TITLE_LEN} chars): {len(df_social)}")
 
-    df_all.sort_values("date", ascending=False, inplace=True)
-    df_filtered.sort_values("date", ascending=False, inplace=True)
-    df_all.reset_index(drop=True, inplace=True)
-    df_filtered.reset_index(drop=True, inplace=True)
+    # Sort both
+    df_official.sort_values("date", ascending=False, inplace=True)
+    df_official.reset_index(drop=True, inplace=True)
+    df_social.sort_values("date", ascending=False, inplace=True)
+    df_social.reset_index(drop=True, inplace=True)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    all_path = os.path.join(OUTPUT_DIR, "all_news_raw.csv")
-    df_all.to_csv(all_path, index=False, encoding="utf-8-sig")
-    print(f"\nRaw dataset saved: {all_path} ({len(df_all)} rows)")
+    # Save official news
+    official_path = os.path.join(OUTPUT_DIR, "ai_infrastructure_news.csv")
+    df_official.to_csv(official_path, index=False, encoding="utf-8-sig")
+    print(f"\nOfficial news saved: {official_path} ({len(df_official)} rows)")
 
-    filtered_path = os.path.join(OUTPUT_DIR, "ai_infrastructure_news.csv")
-    df_filtered.to_csv(filtered_path, index=False, encoding="utf-8-sig")
-    print(f"Filtered dataset saved: {filtered_path} ({len(df_filtered)} rows)")
+    # Save social media posts
+    social_path = os.path.join(OUTPUT_DIR, "social_media_posts.csv")
+    df_social.to_csv(social_path, index=False, encoding="utf-8-sig")
+    print(f"Social media saved: {social_path} ({len(df_social)} rows)")
 
-    return df_all, df_filtered
+    return df_official, df_social
 
 
 if __name__ == "__main__":
