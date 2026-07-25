@@ -57,6 +57,25 @@ class HFNews(Base):
     url = Column(Text)
 
 
+class NewsSentiment(Base):
+    __tablename__ = "news_sentiment"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date)
+    headline = Column(Text)
+    source = Column(String(100))
+    ticker = Column(String(10))
+    url = Column(Text)
+    headline_compound = Column(Float)
+    headline_pos = Column(Float)
+    headline_neg = Column(Float)
+    headline_neu = Column(Float)
+    summary_compound = Column(Float)
+    summary_pos = Column(Float)
+    summary_neg = Column(Float)
+    summary_neu = Column(Float)
+    overall_compound = Column(Float)
+
+
 class Company(Base):
     __tablename__ = "companies"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -121,6 +140,12 @@ CSV_MAP = [
     {
         "file": "hf_financial_news.csv",
         "model": HFNews,
+        "rename": None,
+        "date_col": "date",
+    },
+    {
+        "file": "news_sentiment.csv",
+        "model": NewsSentiment,
         "rename": None,
         "date_col": "date",
     },
