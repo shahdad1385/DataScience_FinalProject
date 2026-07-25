@@ -227,3 +227,4 @@ P3.md
 kubectl
 minikube-linux-amd64
 *.db
+graphify-out
