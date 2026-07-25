@@ -78,6 +78,16 @@ class Company(Base):
     sector = Column(String(50))
 
 
+class EconomicEvent(Base):
+    __tablename__ = "economic_events"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date)
+    event_type = Column(String(50))
+    ticker = Column(String(10))
+    event_name = Column(Text)
+    impact_level = Column(String(20))
+
+
 # ---------------------------------------------------------------------------
 # Company lookup data
 # ---------------------------------------------------------------------------
@@ -128,6 +138,12 @@ CSV_MAP = [
     {
         "file": "news_sentiment.csv",
         "model": NewsSentiment,
+        "rename": None,
+        "date_col": "date",
+    },
+    {
+        "file": "economic_events.csv",
+        "model": EconomicEvent,
         "rename": None,
         "date_col": "date",
     },

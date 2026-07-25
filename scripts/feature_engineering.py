@@ -338,6 +338,64 @@ def add_sentiment_features():
 
 
 # ---------------------------------------------------------------------------
+# Economic event features — earnings proximity, event flags
+# ---------------------------------------------------------------------------
+def add_economic_event_features():
+    print("📅 Adding features to economic_events...")
+
+    features = [
+        ("days_to_next_event", "REAL"),
+        ("days_since_last_event", "REAL"),
+        ("is_earnings_week", "INTEGER"),
+        ("is_dividend_week", "INTEGER"),
+        ("events_this_month", "INTEGER"),
+    ]
+    add_columns_if_missing("economic_events", features)
+
+    try:
+        df = pd.read_sql("SELECT id, date, ticker, event_type FROM economic_events ORDER BY ticker, date", engine)
+    except Exception:
+        print("    No economic_events table found, skipping.")
+        return
+    if df.empty:
+        print("    No events found, skipping.")
+        return
+    df["date"] = pd.to_datetime(df["date"])
+
+    # Per-ticker event features
+    for ticker, group in df.groupby("ticker"):
+        g = group.sort_values("date")
+        idx = g.index
+
+        # Days to next event
+        dates = g["date"].values
+        next_dates = pd.Series(dates).shift(-1).values
+        df.loc[idx, "days_to_next_event"] = (pd.Series(next_dates) - pd.Series(dates)).dt.days
+
+        # Days since last event
+        prev_dates = pd.Series(dates).shift(1).values
+        df.loc[idx, "days_since_last_event"] = (pd.Series(dates) - pd.Series(prev_dates)).dt.days
+
+        # Is earnings week
+        df.loc[idx, "is_earnings_week"] = (g["event_type"] == "earnings").astype(int)
+
+        # Is dividend week
+        df.loc[idx, "is_dividend_week"] = (g["event_type"] == "dividend").astype(int)
+
+        # Events this month (rolling count)
+        monthly = g.set_index("date").resample("M").size()
+        monthly_counts = monthly.reindex(g["date"], method="ffill")
+        df.loc[idx, "events_this_month"] = monthly_counts.values
+
+    updates = df[["id", "days_to_next_event", "days_since_last_event",
+                   "is_earnings_week", "is_dividend_week", "events_this_month"]].copy()
+    updates = updates.where(pd.notnull(updates), None)
+    batch_update("economic_events", updates)
+
+    print(f"    Updated {len(df):,} rows")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -346,6 +404,7 @@ if __name__ == "__main__":
     add_indicator_features()
     add_news_features()
     add_sentiment_features()
+    add_economic_event_features()
     print(f"\n{'=' * 50}")
     print("All features added to database!")
     print(f"{'=' * 50}")
