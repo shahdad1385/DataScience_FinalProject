@@ -10,6 +10,12 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
+try:
+    from scrapling.fetchers import Fetcher as ScraplingFetcher
+    HAS_SCRAPLING = True
+except ImportError:
+    HAS_SCRAPLING = False
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, '..', 'data_samples')
 
@@ -27,7 +33,7 @@ TARGET_KEYWORDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Source definitions — each entry knows how to fetch its own articles
+# Source definitions
 # ---------------------------------------------------------------------------
 SOURCES = [
     {
@@ -62,8 +68,26 @@ SOURCES = [
         "categories": ["semiconductor", "analysis"],
     },
     {
+        "name": "Ars Technica",
+        "type": "rss",
+        "url": "https://feeds.arstechnica.com/arstechnica/technology-lab",
+        "categories": ["technology", "infrastructure"],
+    },
+    {
+        "name": "The Verge",
+        "type": "rss",
+        "url": "https://www.theverge.com/rss/index.xml",
+        "categories": ["technology", "ai"],
+    },
+    {
+        "name": "PCWorld",
+        "type": "rss",
+        "url": "https://www.pcworld.com/feed",
+        "categories": ["hardware", "semiconductor"],
+    },
+    {
         "name": "DataCenterDynamics",
-        "type": "html",
+        "type": "html_scrapling",
         "url": "https://www.datacenterdynamics.com/en/news/",
         "categories": ["datacenter", "infrastructure"],
     },
@@ -76,6 +100,24 @@ SOURCES = [
             "reuters ai infrastructure power grid energy",
         ],
         "categories": ["reuters", "finance", "technology"],
+    },
+    {
+        "name": "CNBC Tech",
+        "type": "google_news_rss",
+        "queries": [
+            "cnbc artificial intelligence semiconductor chip",
+            "cnbc nvidia tsmc data center",
+        ],
+        "categories": ["cnbc", "finance", "technology"],
+    },
+    {
+        "name": "Yahoo Finance",
+        "type": "google_news_rss",
+        "queries": [
+            "yahoo finance ai semiconductor chip nvidia",
+            "yahoo finance data center infrastructure energy",
+        ],
+        "categories": ["yahoo", "finance"],
     },
     {
         "name": "Reddit r/wallstreetbets",
@@ -116,10 +158,9 @@ HEADERS = {
 
 
 # ---------------------------------------------------------------------------
-# Source-specific parsers
+# Utility functions
 # ---------------------------------------------------------------------------
 def _parse_date(raw):
-    """Best-effort date extraction from feed entry."""
     if hasattr(raw, "published_parsed") and raw.published_parsed:
         try:
             return datetime(*raw.published_parsed[:6]).strftime("%Y-%m-%d")
@@ -146,8 +187,18 @@ def _headline_id(headline, url):
     return hashlib.md5(key.encode()).hexdigest()
 
 
+def _extract_date_from_url(url):
+    """Try to extract date from URL patterns like /2024/01/15/..."""
+    match = re.search(r"/(\d{4})/(\d{2})/(\d{2})/", url)
+    if match:
+        return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Source-specific parsers
+# ---------------------------------------------------------------------------
 def fetch_rss(source):
-    """Parse an RSS/Atom feed and return normalised article dicts."""
     feed = feedparser.parse(source["url"])
     articles = []
     for entry in feed.entries:
@@ -155,7 +206,6 @@ def fetch_rss(source):
         link = getattr(entry, "link", "")
         summary = _clean(getattr(entry, "summary", getattr(entry, "description", "")))
         date = _parse_date(entry)
-        tags = [t.get("term", "") for t in getattr(entry, "tags", [])]
 
         if not title or len(title) < 10 or not link:
             continue
@@ -167,19 +217,24 @@ def fetch_rss(source):
             "url": link,
             "source": source["name"],
             "source_categories": ",".join(source["categories"]),
-            "tags": ",".join(tags),
+            "tags": ",".join([t.get("term", "") for t in getattr(entry, "tags", [])]),
         })
     return articles
 
 
-def fetch_html(source):
-    """Scrape a static HTML listing page for article links + headlines."""
+def fetch_html_scrapling(source):
+    """Scrape using Scrapling for Cloudflare-protected sites."""
     articles = []
     try:
-        resp = requests.get(source["url"], headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+        if HAS_SCRAPLING:
+            page = ScraplingFetcher.get(source["url"], stealthy_headers=True)
+            html_content = page.html_content if hasattr(page, 'html_content') else str(page.body)
+        else:
+            resp = requests.get(source["url"], headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            html_content = resp.text
 
+        soup = BeautifulSoup(html_content, "html.parser")
         seen = set()
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
@@ -220,12 +275,11 @@ def fetch_html(source):
                 "tags": "",
             })
     except Exception as e:
-        print(f"  ⚠ Failed to scrape {source['name']}: {e}")
+        print(f"  Failed to scrape {source['name']}: {e}")
     return articles
 
 
 def _resolve_google_news_url(google_url):
-    """Extract the actual article URL from a Google News redirect link."""
     parsed = urlparse(google_url)
     if "news.google.com" not in parsed.netloc:
         return google_url
@@ -236,7 +290,6 @@ def _resolve_google_news_url(google_url):
 
 
 def fetch_google_news_rss(source):
-    """Fetch articles via Google News RSS, filtered to a specific publisher."""
     articles = []
     seen_urls = set()
 
@@ -279,7 +332,6 @@ def fetch_google_news_rss(source):
 
 
 def fetch_reddit_rss(source):
-    """Fetch posts from a subreddit via RSS feed."""
     articles = []
     try:
         feed = feedparser.parse(source["url"])
@@ -302,13 +354,13 @@ def fetch_reddit_rss(source):
                 "tags": "",
             })
     except Exception as e:
-        print(f"  ⚠ Failed to fetch {source['name']}: {e}")
+        print(f"  Failed to fetch {source['name']}: {e}")
     return articles
 
 
 FETCHERS = {
     "rss": fetch_rss,
-    "html": fetch_html,
+    "html_scrapling": fetch_html_scrapling,
     "google_news_rss": fetch_google_news_rss,
     "reddit_rss": fetch_reddit_rss,
 }
@@ -337,47 +389,44 @@ def deduplicate(articles):
 # Main pipeline
 # ---------------------------------------------------------------------------
 def collect_all():
-    print("🚀 Multi-Source AI Infrastructure News Collector\n")
+    print("Multi-Source AI Infrastructure News Collector\n")
+    print(f"Scrapling available: {HAS_SCRAPLING}\n")
     all_articles = []
 
     for source in SOURCES:
-        print(f"📡 Fetching from {source['name']} ({source['type']})...")
+        print(f"Fetching from {source['name']} ({source['type']})...")
         fetcher = FETCHERS[source["type"]]
         articles = fetcher(source)
-        print(f"   → {len(articles)} raw articles")
+        print(f"  -> {len(articles)} raw articles")
         all_articles.extend(articles)
         if source["type"] == "reddit_rss":
             time.sleep(4)
 
-    print(f"\n📊 Total raw articles collected: {len(all_articles)}")
+    print(f"\nTotal raw articles collected: {len(all_articles)}")
 
-    # Deduplicate across sources
     all_articles = deduplicate(all_articles)
-    print(f"📊 After deduplication: {len(all_articles)}")
+    print(f"After deduplication: {len(all_articles)}")
 
     df_all = pd.DataFrame(all_articles)
 
-    # Keyword filtering
     mask = df_all.apply(lambda row: matches_keywords(row, TARGET_KEYWORDS), axis=1)
     df_filtered = df_all[mask].copy()
-    print(f"📊 After keyword filtering: {len(df_filtered)}")
+    print(f"After keyword filtering: {len(df_filtered)}")
 
-    # Sort by date descending
     df_all.sort_values("date", ascending=False, inplace=True)
     df_filtered.sort_values("date", ascending=False, inplace=True)
     df_all.reset_index(drop=True, inplace=True)
     df_filtered.reset_index(drop=True, inplace=True)
 
-    # Save outputs
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     all_path = os.path.join(OUTPUT_DIR, "all_news_raw.csv")
     df_all.to_csv(all_path, index=False, encoding="utf-8-sig")
-    print(f"\n📁 Raw dataset saved: {all_path} ({len(df_all)} rows)")
+    print(f"\nRaw dataset saved: {all_path} ({len(df_all)} rows)")
 
     filtered_path = os.path.join(OUTPUT_DIR, "ai_infrastructure_news.csv")
     df_filtered.to_csv(filtered_path, index=False, encoding="utf-8-sig")
-    print(f"📁 Filtered dataset saved: {filtered_path} ({len(df_filtered)} rows)")
+    print(f"Filtered dataset saved: {filtered_path} ({len(df_filtered)} rows)")
 
     return df_all, df_filtered
 
