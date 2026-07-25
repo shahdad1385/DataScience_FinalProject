@@ -33,7 +33,7 @@ SAVE_INTERVAL = 100      # save to DB every N summaries
 FETCH_TIMEOUT = 10
 MAX_RETRIES = 3
 
-PROMPT_TEMPLATE = """Summarize this financial news headline in one sentence for stock market analysis. Which company is affected, what happened, and market impact?
+PROMPT_TEMPLATE = """Write a 2-4 sentence summary of this financial news for stock market analysis. Mention which company/ticker is affected, what happened, and potential market impact. Do NOT include any reasoning, analysis, or step-by-step thinking. Output ONLY the summary — nothing else.
 
 Headline: {content}
 
