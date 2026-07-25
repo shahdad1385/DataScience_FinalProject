@@ -303,14 +303,68 @@ def add_hf_features():
 
 
 # ---------------------------------------------------------------------------
+# Sentiment features — rolling avg, momentum, daily aggregates
+# ---------------------------------------------------------------------------
+def add_sentiment_features():
+    print("💬 Adding features to news_sentiment...")
+
+    features = [
+        ("daily_avg_compound", "REAL"),
+        ("daily_sentiment_std", "REAL"),
+        ("daily_article_count", "INTEGER"),
+        ("ticker_daily_avg", "REAL"),
+        ("sentiment_momentum_3d", "REAL"),
+        ("sentiment_momentum_7d", "REAL"),
+    ]
+    add_columns_if_missing("news_sentiment", features)
+
+    df = pd.read_sql("SELECT id, date, ticker, overall_compound FROM news_sentiment", engine)
+    if df.empty:
+        print("    No sentiment data found, skipping.")
+        return
+    df["date"] = pd.to_datetime(df["date"])
+
+    # Daily aggregates (across all tickers)
+    daily_stats = df.groupby("date").agg(
+        daily_avg_compound=("overall_compound", "mean"),
+        daily_sentiment_std=("overall_compound", "std"),
+        daily_article_count=("overall_compound", "count"),
+    ).reset_index()
+    df = df.merge(daily_stats, on="date", how="left")
+
+    # Per-ticker daily average
+    ticker_daily = df.groupby(["date", "ticker"])["overall_compound"].mean().rename("ticker_daily_avg").reset_index()
+    df = df.merge(ticker_daily, on=["date", "ticker"], how="left")
+
+    # Sentiment momentum: rolling mean change over 3 and 7 days
+    df.sort_values(["ticker", "date"], inplace=True)
+    for ticker, group in df.groupby("ticker"):
+        if pd.isna(ticker):
+            continue
+        g_idx = group.index
+        rolled_3 = group["overall_compound"].rolling(3, min_periods=1).mean()
+        rolled_7 = group["overall_compound"].rolling(7, min_periods=1).mean()
+        df.loc[g_idx, "sentiment_momentum_3d"] = rolled_3.diff(1)
+        df.loc[g_idx, "sentiment_momentum_7d"] = rolled_7.diff(1)
+
+    updates = df[["id", "daily_avg_compound", "daily_sentiment_std", "daily_article_count",
+                   "ticker_daily_avg", "sentiment_momentum_3d", "sentiment_momentum_7d"]].copy()
+    updates = updates.where(pd.notnull(updates), None)
+    batch_update("news_sentiment", updates)
+
+    print(f"    Updated {len(df):,} rows")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("🔧 Adding features to database tables...\n")
+    print("Adding features to database tables...\n")
     add_stock_features()
     add_indicator_features()
     add_news_features()
     add_hf_features()
-    print(f"\n{'='*50}")
-    print("✅ All features added to database!")
-    print(f"{'='*50}")
+    add_sentiment_features()
+    print(f"\n{'=' * 50}")
+    print("All features added to database!")
+    print(f"{'=' * 50}")
