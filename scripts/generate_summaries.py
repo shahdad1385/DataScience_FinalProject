@@ -39,7 +39,7 @@ SAVE_INTERVAL = 20       # save to DB every N summaries (smaller = faster DB upd
 FETCH_TIMEOUT = 10
 MAX_RETRIES = 3
 
-PROMPT_TEMPLATE = """Write a 2-4 sentence summary of this financial news for stock market analysis. Mention which company/ticker is affected, what happened, and potential market impact. Do NOT include any reasoning, analysis, or step-by-step thinking. Output ONLY the summary — nothing else.
+PROMPT_TEMPLATE = """Summarize this AI/tech news article in 2-3 sentences. Cover what the news is about, which company or product is involved, and why it matters for the AI/tech industry. Do not include reasoning or step-by-step analysis — output only the summary.
 
 Headline: {content}
 
@@ -97,7 +97,9 @@ def generate_summary(client, headline, article_content, model_idx):
             for pat in [r"Must mention.*?impact\.\s*", r"No preamble.*?sentence\.\s*",
                         r"Headline:\s*.*?\n\s*Summary:\s*",
                         r"Okay,?\s*the user.*?(?:headline|summary)[^:]*:\s*[\"']?\s*",
-                        r"Okay,?\s*the user.*?[\"']\s*\n?\s*"]:
+                        r"Okay,?\s*the user.*?[\"']\s*\n?\s*",
+                        r"I'm sorry.*?(?:provide|seem).*?\n\s*",
+                        r"I'm sorry.*?headline.*?\n\s*"]:
                 m = re.search(pat, result, re.IGNORECASE)
                 if m:
                     result = result[m.end():]
