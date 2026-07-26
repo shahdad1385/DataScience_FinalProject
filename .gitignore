@@ -229,3 +229,4 @@ minikube-linux-amd64
 *.db
 graphify-out
 *opencode*
+*backup*
