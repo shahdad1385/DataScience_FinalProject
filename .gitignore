@@ -231,3 +231,5 @@ graphify-out
 *opencode*
 *backup*
 master_plan.md
+data_samples/_cache/
+plans/
