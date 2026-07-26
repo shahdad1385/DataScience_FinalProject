@@ -27,9 +27,15 @@ except ImportError:
     pass
 
 API_KEY = os.environ.get("NVIDIA_API_KEY", "")
-MODEL_NAME = "nvidia/nemotron-3-super-120b-a12b"
+MODELS = [
+    "meta/llama-3.1-8b-instruct",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "meta/llama-3.1-8b-instruct",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "meta/llama-3.1-8b-instruct",
+]
 NUM_WORKERS = 5          # parallel API calls
-SAVE_INTERVAL = 100      # save to DB every N summaries
+SAVE_INTERVAL = 20       # save to DB every N summaries (smaller = faster DB updates)
 FETCH_TIMEOUT = 10
 MAX_RETRIES = 3
 
@@ -68,7 +74,9 @@ def fetch_article_content(url):
         return None
 
 
-def generate_summary(client, headline, article_content):
+def generate_summary(client, headline, article_content, model_idx):
+    """Call LLM to summarize with model rotation to avoid rate limits."""
+    model = MODELS[model_idx % len(MODELS)]
     content = headline
     if article_content:
         content = f"{headline}\n\n{article_content[:1500]}"
@@ -77,7 +85,7 @@ def generate_summary(client, headline, article_content):
     for attempt in range(MAX_RETRIES):
         try:
             completion = client.chat.completions.create(
-                model=MODEL_NAME,
+                model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3, top_p=0.9, max_tokens=200, stream=False,
             )
@@ -115,10 +123,12 @@ def generate_summary(client, headline, article_content):
     return None
 
 
-def process_one(client, article):
+def process_one(client, article, model_idx):
     article_id, headline, url, _ = article
     article_content = fetch_article_content(url)
-    summary = generate_summary(client, headline, article_content)
+    summary = generate_summary(client, headline, article_content, model_idx)
+    if not summary:
+        print(f"  FAIL ID={article_id}: {headline[:50]}", flush=True)
     return (article_id, summary)
 
 
@@ -152,7 +162,7 @@ def main():
     lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
-        futures = {executor.submit(process_one, client, a): a for a in articles}
+        futures = {executor.submit(process_one, client, a, i): a for i, a in enumerate(articles)}
 
         for future in as_completed(futures):
             article_id, summary = future.result()
