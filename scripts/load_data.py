@@ -1,9 +1,14 @@
 import os
 import pandas as pd
-from sqlalchemy import Column, Integer, Float, String, Text, DateTime, Date
+from sqlalchemy import Column, Integer, Float, String, Text, DateTime, Date, text
 from sqlalchemy.orm import Session
 
 from database_connection import Base, get_engine, get_session, get_db_path
+
+engine = get_engine()
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data_samples")
+LLM_SUMMARY_CACHE = os.path.join(DATA_DIR, "_cache", "llm_summaries.csv")
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +135,6 @@ COMPANIES = [
 # ---------------------------------------------------------------------------
 # CSV-to-table mapping (non-news tables)
 # ---------------------------------------------------------------------------
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data_samples")
 
 CSV_MAP = [
     {
@@ -168,7 +172,21 @@ CSV_MAP = [
 ]
 
 
+def _table_has_rows(model):
+    """True if the model's table already has data (warm run). Used to make
+    load idempotent: we never re-append raw rows on top of existing ones,
+    because that would duplicate news rows and silently orphan their
+    llm_summary backups stored by content key (headline, url) outside the
+    autoincrement id space."""
+    with engine.connect() as conn:
+        return conn.execute(text(f"SELECT COUNT(*) FROM {model.__tablename__}")).scalar() > 0
+
+
 def load_csv_to_table(csv_info, session):
+    if _table_has_rows(csv_info["model"]):
+        print(f"   {csv_info['model'].__tablename__} already populated, skipping load.")
+        return 0
+
     filepath = os.path.join(DATA_DIR, csv_info["file"])
     if not os.path.exists(filepath):
         print(f"   File not found: {filepath}, skipping.")
@@ -195,7 +213,13 @@ def load_csv_to_table(csv_info, session):
 
 
 def load_merged_news(session):
-    """Load both news CSVs into the unified 'news' table."""
+    """Load both news CSVs into the unified 'news' table (cold start only).
+    On a warm run the table already holds news WITH llm_summary filled, so
+    re-loading would duplicate rows and lose the summaries — skip."""
+    if _table_has_rows(News):
+        print("  news already populated, skipping load.")
+        return 0
+
     total = 0
 
     # Load industry news (news_articles CSV)
@@ -242,14 +266,13 @@ def load_merged_news(session):
 
 
 def create_database():
-    print("  Creating SQLite database...\n")
+    print("  Setting up SQLite database...\n")
 
-    engine = get_engine()
     Base.metadata.create_all(engine)
     print(f"   Database: {get_db_path()}")
 
     tables = [t.name for t in Base.metadata.sorted_tables]
-    print(f"   Tables created: {', '.join(tables)}\n")
+    print(f"   Tables present: {', '.join(tables)}\n")
 
     session = get_session()
 
@@ -262,7 +285,7 @@ def create_database():
     session.commit()
     print(f"   {len(COMPANIES)} companies loaded")
 
-    # Load non-news CSVs
+    # Load non-news CSVs (idempotent: skipped if table already has rows)
     total = 0
     for csv_info in CSV_MAP:
         print(f"Loading {csv_info['file']}...")
@@ -270,21 +293,63 @@ def create_database():
         total += count
         print(f"   {count:,} rows inserted")
 
-    # Load merged news
+    # Load merged news (idempotent: skipped on warm run to preserve llm_summary)
     print("Loading news (merged)...")
     news_count = load_merged_news(session)
     total += news_count
     print(f"   {news_count:,} rows inserted")
 
+    # Restore llm_summary from cache for any news rows still missing it
+    # (cold start, or partially-generated DB). Safe to always run: only
+    # touches NULL rows matched by (headline, url). Idempotent.
+    restored = restore_llm_summary_from_cache()
+    print(f"   llm_summary restored for {restored:,} news rows from cache")
+
     session.close()
 
     print(f"\n{'='*50}")
-    print(f"Database created successfully!")
-    print(f"Total rows inserted: {total:,}")
+    print(f"Database ready!")
+    print(f"Total new rows inserted this run: {total:,}")
     print(f"File: {get_db_path()}")
     print(f"{'='*50}")
 
     return get_db_path()
+
+
+def restore_llm_summary_from_cache():
+    """Fill news.llm_summary for any row where it's still NULL, using the
+    snapshot at data_samples/_cache/llm_summaries.csv joined by
+    (headline, url). Returns the number of rows updated. No-op if the
+    cache is missing or no NULL news rows match."""
+    if not os.path.exists(LLM_SUMMARY_CACHE):
+        return 0
+
+    cache = pd.read_csv(LLM_SUMMARY_CACHE, usecols=["headline", "url", "llm_summary"])
+    cache = cache.dropna(subset=["llm_summary"])
+    # Drop dup (headline, url) keeping first — cache may have grown across exports
+    cache = cache.drop_duplicates(subset=["headline", "url"], keep="first")
+    cache = cache.rename(columns={"llm_summary": "summary_text"})
+
+    with engine.connect() as conn:
+        null_rows = pd.read_sql(
+            "SELECT id, headline, url FROM news WHERE llm_summary IS NULL",
+            conn,
+        )
+
+    if null_rows.empty:
+        return 0
+
+    joined = null_rows.merge(cache, on=["headline", "url"], how="inner")
+    if joined.empty:
+        return 0
+
+    with engine.begin() as conn:
+        for _, r in joined.iterrows():
+            conn.execute(
+                text("UPDATE news SET llm_summary = :s WHERE id = :i"),
+                {"s": str(r["summary_text"]), "i": int(r["id"])},
+            )
+    return len(joined)
 
 
 if __name__ == "__main__":
