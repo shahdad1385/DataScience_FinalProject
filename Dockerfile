@@ -7,4 +7,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python3", "-m", "scripts.pipeline.run"]
+ENTRYPOINT ["python3", "pipeline.py"]
+CMD ["--mode", "evaluate"]
