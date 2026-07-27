@@ -9,5 +9,6 @@ spec:
       - name: caf-pipeline
         image: caf-pipeline
         imagePullPolicy: Never
+        command: ["python3", "-m", "scripts.pipeline.run"]
       restartPolicy: Never
   backoffLimit: 0
