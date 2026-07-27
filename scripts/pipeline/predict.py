@@ -13,7 +13,7 @@ from sqlalchemy import text
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from database_connection import get_engine
+from scripts.db import get_engine
 
 from .data_assembly import prepare_data, flatten_sequences, TICKERS, SEQ_LEN
 

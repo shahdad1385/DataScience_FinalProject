@@ -13,8 +13,8 @@ import os
 import sys
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from database_connection import get_engine, get_db_path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.db import get_engine, get_db_path
 
 CACHE_DIR = os.path.join(os.path.dirname(get_db_path()), "_cache")
 CACHE_PATH = os.path.join(CACHE_DIR, "llm_summaries.csv")

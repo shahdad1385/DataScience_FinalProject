@@ -6,8 +6,8 @@ import holidays
 from sqlalchemy import text
 from sklearn.preprocessing import OneHotEncoder
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from database_connection import get_engine
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.db import get_engine
 
 engine = get_engine()
 US_HOLIDAYS = holidays.US(years=range(2018, 2027))

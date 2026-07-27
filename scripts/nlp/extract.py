@@ -15,7 +15,7 @@ import pandas as pd
 from sqlalchemy import text
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from database_connection import get_engine
+from scripts.db import get_engine
 
 from . import word2vec as w2v_module
 from . import bert as bert_module
