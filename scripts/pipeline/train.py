@@ -1,5 +1,5 @@
 """
-Pipeline — train all models, compare, ensemble, select best.
+Pipeline — train all models, compare, ensemble, select best, evaluate.
 
 Orchestrates: NLP features → clustering → data assembly → time series models → tabular models → ensemble.
 """
@@ -23,6 +23,8 @@ from ..timeseries import pipe as ts_pipe
 from ..tabular import pipe as tab_pipe
 from ..clustering import cluster
 
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+
 
 def log_mlflow_metrics(results, prefix):
     """Log all model metrics from a results dict to MLflow."""
@@ -35,24 +37,35 @@ def log_mlflow_metrics(results, prefix):
                 mlflow.log_metric(f"{prefix}_{name}_{metric_name}", value)
 
 
-def train_all_models(verbose=True):
+def load_hyperparams():
+    """Load best hyperparameters from finetune run if available."""
+    path = os.path.join(MODELS_DIR, "best_hyperparams.pkl")
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    return {}
+
+
+def train_all_models(verbose=True, model_filter=None, epochs=100, lr=1e-3,
+                     patience=10, skip_nlp=False):
     """
     Full training pipeline.
 
-    Steps:
-    1. Load and assemble data
-    2. Train time series models (LSTM, GRU, Transformer, BiLSTM, TCN)
-    3. Train tabular models (XGBoost, RF, LightGBM, MLP, Logistic, Ridge)
-    4. Compare and select best
-    5. Ensemble voting
-    6. Save results
-
-    Returns:
-        dict with all results
+    Args:
+        verbose: print progress
+        model_filter: if set, only train this model (e.g. "xgboost", "lstm")
+        epochs: max training epochs for time series models
+        lr: learning rate for time series models
+        patience: early stopping patience
+        skip_nlp: skip NLP feature extraction
     """
     print("=" * 60)
     print("FULL TRAINING PIPELINE")
     print("=" * 60)
+
+    hyperparams = load_hyperparams()
+    if hyperparams:
+        print(f"Loaded hyperparameters from finetune run: {len(hyperparams)} models")
 
     mlflow.set_experiment("CAF_Stock_Prediction")
     run = mlflow.start_run(run_name="full_pipeline")
@@ -94,59 +107,133 @@ def train_all_models(verbose=True):
         mlflow.log_param("tickers", str(TICKERS))
 
         # === 3. Train time series models ===
-        print("\n[3/6] Training time series models...")
-        ts_results = ts_pipe.train_all(
-            X_tr_seq, y_reg_tr, y_cls_tr,
-            X_v_seq, y_reg_v, y_cls_v,
-            seq_len=SEQ_LEN, n_tickers=n_tickers, verbose=verbose,
-        )
-        log_mlflow_metrics(ts_results, "ts")
+        ts_models_to_train = ["lstm", "gru", "transformer", "bilstm", "tcn"]
+        if model_filter and model_filter in ts_models_to_train:
+            ts_models_to_train = [model_filter]
+        elif model_filter and model_filter not in ts_models_to_train:
+            ts_models_to_train = []
+
+        ts_results = {}
+        if ts_models_to_train:
+            print("\n[3/6] Training time series models...")
+            for model_name in ts_models_to_train:
+                hp = hyperparams.get(f"ts_{model_name}", {})
+                model_lr = hp.get("lr", lr)
+                model_epochs = hp.get("epochs", epochs)
+                model_patience = hp.get("patience", patience)
+                model_batch_size = hp.get("batch_size", 64)
+                model_hidden = hp.get("hidden_size", 64)
+                model_n_layers = hp.get("n_layers", 2)
+                model_dropout = hp.get("dropout", 0.2)
+
+                print(f"\n  Training {model_name.upper()} (lr={model_lr:.2e}, hidden={model_hidden}, layers={model_n_layers})")
+                result = ts_pipe.train_single(
+                    model_name,
+                    X_tr_seq, y_reg_tr, y_cls_tr,
+                    X_v_seq, y_reg_v, y_cls_v,
+                    seq_len=SEQ_LEN, n_tickers=n_tickers,
+                    lr=model_lr, epochs=model_epochs, patience=model_patience,
+                    batch_size=model_batch_size, hidden_size=model_hidden,
+                    n_layers=model_n_layers, dropout=model_dropout,
+                    verbose=verbose,
+                )
+                ts_results[model_name] = result
+            log_mlflow_metrics(ts_results, "ts")
 
         # === 4. Train tabular models ===
-        print("\n[4/6] Training tabular regression models...")
-        tab_reg_results = tab_pipe.train_all_regression(
-            X_tr_flat, y_reg_tr, X_v_flat, y_reg_v,
-            feature_names=feature_names, verbose=verbose,
-        )
-        log_mlflow_metrics(tab_reg_results, "tab_reg")
+        tab_reg_models_to_train = ["xgboost", "random_forest", "mlp", "ridge"]
+        tab_cls_models_to_train = ["xgboost", "random_forest", "mlp", "logistic"]
+        try:
+            import lightgbm
+            tab_reg_models_to_train.insert(2, "lightgbm")
+            tab_cls_models_to_train.insert(2, "lightgbm")
+        except ImportError:
+            pass
 
-        print("\n[4/6] Training tabular classification models...")
-        tab_cls_results = tab_pipe.train_all_classification(
-            X_tr_flat, y_cls_tr, X_v_flat, y_cls_v,
-            feature_names=feature_names, verbose=verbose,
-        )
-        log_mlflow_metrics(tab_cls_results, "tab_cls")
+        if model_filter:
+            if model_filter in tab_reg_models_to_train:
+                tab_reg_models_to_train = [model_filter]
+            elif model_filter not in ("lstm", "gru", "transformer", "bilstm", "tcn"):
+                tab_reg_models_to_train = []
+            else:
+                tab_reg_models_to_train = []
+
+            if model_filter in tab_cls_models_to_train:
+                tab_cls_models_to_train = [model_filter]
+            elif model_filter not in ("lstm", "gru", "transformer", "bilstm", "tcn"):
+                tab_cls_models_to_train = []
+            else:
+                tab_cls_models_to_train = []
+
+        tab_reg_results = {}
+        if tab_reg_models_to_train:
+            print("\n[4/6] Training tabular regression models...")
+            for model_name in tab_reg_models_to_train:
+                hp = hyperparams.get(f"tab_reg_{model_name}", {})
+                print(f"\n  Training {model_name.upper()} regression (params: {hp})")
+            tab_reg_results = tab_pipe.train_all_regression(
+                X_tr_flat, y_reg_tr, X_v_flat, y_reg_v,
+                feature_names=feature_names, verbose=verbose,
+                model_filter=tab_reg_models_to_train, hyperparams=hyperparams,
+            )
+            log_mlflow_metrics(tab_reg_results, "tab_reg")
+
+        tab_cls_results = {}
+        if tab_cls_models_to_train:
+            print("\n[4/6] Training tabular classification models...")
+            for model_name in tab_cls_models_to_train:
+                hp = hyperparams.get(f"tab_cls_{model_name}", {})
+                print(f"\n  Training {model_name.upper()} classification (params: {hp})")
+            tab_cls_results = tab_pipe.train_all_classification(
+                X_tr_flat, y_cls_tr, X_v_flat, y_cls_v,
+                feature_names=feature_names, verbose=verbose,
+                model_filter=tab_cls_models_to_train, hyperparams=hyperparams,
+            )
+            log_mlflow_metrics(tab_cls_results, "tab_cls")
 
         # === 5. Select best models ===
         print("\n[5/6] Selecting best models...")
 
-        ts_best_name, ts_best = ts_pipe.select_best(ts_results)
-        print(f"  Best time series: {ts_best_name} (val_loss={ts_best['val_loss']:.6f})")
+        ts_best_name, ts_best = None, None
+        if ts_results:
+            ts_best_name, ts_best = ts_pipe.select_best(ts_results)
+            print(f"  Best time series: {ts_best_name} (val_loss={ts_best['val_loss']:.6f})")
 
-        tab_reg_best = tab_reg_results["_best"]
-        tab_reg_rmse = tab_reg_results[tab_reg_best]["overall"]["rmse"]
-        print(f"  Best tabular regression: {tab_reg_best} (RMSE={tab_reg_rmse:.6f})")
+        tab_reg_best, tab_reg_rmse = None, None
+        if tab_reg_results and "_best" in tab_reg_results:
+            tab_reg_best = tab_reg_results["_best"]
+            tab_reg_rmse = tab_reg_results[tab_reg_best]["overall"]["rmse"]
+            print(f"  Best tabular regression: {tab_reg_best} (RMSE={tab_reg_rmse:.6f})")
 
-        tab_cls_best = tab_cls_results["_best"]
-        tab_cls_f1 = tab_cls_results[tab_cls_best]["overall"].get("f1", 0)
-        print(f"  Best tabular classification: {tab_cls_best} (F1={tab_cls_f1:.4f})")
+        tab_cls_best, tab_cls_f1 = None, None
+        if tab_cls_results and "_best" in tab_cls_results:
+            tab_cls_best = tab_cls_results["_best"]
+            tab_cls_f1 = tab_cls_results[tab_cls_best]["overall"].get("f1", 0)
+            print(f"  Best tabular classification: {tab_cls_best} (F1={tab_cls_f1:.4f})")
 
         # === 6. Ensemble voting ===
-        print("\n[6/6] Ensemble voting...")
-        ensemble = create_ensemble(
-            ts_results, ts_best_name,
-            tab_reg_results, tab_reg_best,
-            tab_cls_results, tab_cls_best,
-            X_v_seq, X_v_flat,
-        )
+        ensemble = None
+        if ts_results and tab_reg_results and tab_cls_results:
+            print("\n[6/6] Ensemble voting...")
+            ensemble = create_ensemble(
+                ts_results, ts_best_name,
+                tab_reg_results, tab_reg_best,
+                tab_cls_results, tab_cls_best,
+                X_v_seq, X_v_flat,
+            )
+        else:
+            print("\n[6/6] Skipping ensemble (not all model types trained)")
 
         # Log best model info
-        mlflow.log_param("ts_best_model", ts_best_name)
-        mlflow.log_param("tab_reg_best_model", tab_reg_best)
-        mlflow.log_param("tab_cls_best_model", tab_cls_best)
-        mlflow.log_metric("ts_best_val_loss", ts_best["val_loss"])
-        mlflow.log_metric("tab_reg_best_rmse", tab_reg_rmse)
-        mlflow.log_metric("tab_cls_best_f1", tab_cls_f1)
+        if ts_best_name:
+            mlflow.log_param("ts_best_model", ts_best_name)
+            mlflow.log_metric("ts_best_val_loss", ts_best["val_loss"])
+        if tab_reg_best:
+            mlflow.log_param("tab_reg_best_model", tab_reg_best)
+            mlflow.log_metric("tab_reg_best_rmse", tab_reg_rmse)
+        if tab_cls_best:
+            mlflow.log_param("tab_cls_best_model", tab_cls_best)
+            mlflow.log_metric("tab_cls_best_f1", tab_cls_f1)
 
         # Log feature names as artifact
         import tempfile
@@ -156,10 +243,11 @@ def train_all_models(verbose=True):
             os.unlink(f.name)
 
         # Log ensemble predictions as artifact
-        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
-            pickle.dump(ensemble, f)
-            mlflow.log_artifact(f.name, "ensemble")
-            os.unlink(f.name)
+        if ensemble:
+            with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+                pickle.dump(ensemble, f)
+                mlflow.log_artifact(f.name, "ensemble")
+                os.unlink(f.name)
 
         # === Save everything ===
         print("\nSaving results...")
@@ -183,6 +271,206 @@ def train_all_models(verbose=True):
         mlflow.end_run()
 
 
+def evaluate_saved_models(model_filter=None):
+    """
+    Load saved models and evaluate on test set.
+
+    Args:
+        model_filter: if set, only evaluate this model
+    """
+    print("\n" + "=" * 60)
+    print("EVALUATION MODE — Loading saved models")
+    print("=" * 60)
+
+    # Load test data
+    X_train, y_reg_train, y_cls_train, feature_names, _ = prepare_data("train")
+    X_val, y_reg_val, y_cls_val, _, _ = prepare_data("val")
+    X_test, y_reg_test, y_cls_test, _, df_test = prepare_data("test")
+
+    if X_test is None:
+        print("ERROR: No test data.")
+        return None
+
+    (X_tr_seq, y_reg_tr, y_cls_tr,
+     X_v_seq, y_reg_v, y_cls_v,
+     X_te_seq, y_reg_te, y_cls_te) = prepare_sequences(
+        X_train, y_reg_train, y_cls_train,
+        X_val, y_reg_val, y_cls_val,
+        X_test, y_reg_test, y_cls_test,
+    )
+
+    X_tr_flat = flatten_sequences(X_tr_seq)
+    X_v_flat = flatten_sequences(X_v_seq)
+    X_te_flat = flatten_sequences(X_te_seq)
+
+    n_tickers = len(TICKERS)
+    input_size = X_tr_seq.shape[2]
+
+    mlflow.set_experiment("CAF_Stock_Prediction")
+    run = mlflow.start_run(run_name="evaluate")
+    results = {}
+
+    try:
+        mlflow.log_param("mode", "evaluate")
+        mlflow.log_param("n_samples_test", X_test.shape[0])
+
+        # Evaluate time series models
+        ts_models = ["lstm", "gru", "transformer", "bilstm", "tcn"]
+        if model_filter and model_filter in ts_models:
+            ts_models = [model_filter]
+        elif model_filter and model_filter not in ts_models:
+            ts_models = []
+
+        for model_name in ts_models:
+            try:
+                model_path = os.path.join(MODELS_DIR, f"timeseries_{model_name}.pt")
+                if not os.path.exists(model_path):
+                    print(f"  Skipping {model_name}: no saved weights")
+                    continue
+
+                from ..timeseries import lstm, gru, transformer, bilstm, tcn
+                from ..timeseries.train import load_model, validate, get_device
+                from ..timeseries.data import create_dataloaders
+
+                model_modules = {
+                    "lstm": lstm, "gru": gru, "transformer": transformer,
+                    "bilstm": bilstm, "tcn": tcn,
+                }
+
+                mod = model_modules[model_name]
+                model = load_model(mod.create_model, f"timeseries_{model_name}", n_tickers=n_tickers)
+
+                device = get_device()
+                _, _, test_loader = create_dataloaders(
+                    X_tr_seq, y_reg_tr, y_cls_tr,
+                    X_v_seq, y_reg_v, y_cls_v,
+                    X_te_seq, y_reg_te, y_cls_te,
+                    seq_len=SEQ_LEN, batch_size=64,
+                )
+
+                val_loss, (reg_pred, cls_pred, reg_true, cls_true) = validate(model, test_loader, device)
+
+                from ..tabular.regress import evaluate_regression
+                from ..tabular.classify import evaluate_classification
+
+                reg_metrics = evaluate_regression(reg_true, reg_pred)
+                cls_metrics = evaluate_classification(cls_true, (cls_pred > 0.5).astype(int), cls_pred)
+
+                results[f"ts_{model_name}"] = {
+                    "regression": reg_metrics,
+                    "classification": cls_metrics,
+                    "val_loss": val_loss,
+                }
+
+                print(f"\n  {model_name.upper()} (test):")
+                print(f"    Regression  — RMSE: {reg_metrics['rmse']:.6f} | MAE: {reg_metrics['mae']:.6f} | R2: {reg_metrics['r2']:.4f}")
+                print(f"    Classification — F1: {cls_metrics.get('f1', 0):.4f} | Acc: {cls_metrics.get('accuracy', 0):.4f}")
+
+                mlflow.log_metric(f"eval_ts_{model_name}_rmse", reg_metrics["rmse"])
+                mlflow.log_metric(f"eval_ts_{model_name}_f1", cls_metrics.get("f1", 0))
+                mlflow.log_metric(f"eval_ts_{model_name}_val_loss", val_loss)
+
+            except Exception as e:
+                print(f"  Error evaluating {model_name}: {e}")
+
+        # Evaluate tabular models
+        tab_models = ["xgboost", "random_forest", "lightgbm", "mlp", "ridge", "logistic"]
+        if model_filter and model_filter in tab_models:
+            tab_models = [model_filter]
+        elif model_filter and model_filter not in tab_models:
+            tab_models = []
+
+        for model_name in tab_models:
+            try:
+                pkl_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_reg.pkl")
+                mlp_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_reg/")
+                if not os.path.exists(pkl_path) and not os.path.exists(mlp_path):
+                    print(f"  Skipping {model_name}: no saved weights")
+                    continue
+
+                from ..tabular import pipe as tab_pipe
+                from ..tabular.regress import evaluate_regression
+                from ..tabular.classify import evaluate_classification
+
+                # Load and evaluate regression
+                if os.path.exists(pkl_path):
+                    with open(pkl_path, "rb") as f:
+                        model = pickle.load(f)
+                    if model_name in ("xgboost", "lightgbm", "random_forest"):
+                        pred_reg = model.predict(X_te_flat)
+                    elif model_name == "ridge":
+                        pred_reg = model.predict(X_te_flat)
+                    else:
+                        continue
+                elif os.path.exists(mlp_path):
+                    from ..tabular.mlp import predict_regressor, load_model as load_mlp_model
+                    model = load_mlp_model(f"tabular_{model_name}_reg")
+                    pred_reg = predict_regressor(model, X_te_flat)
+                else:
+                    continue
+
+                reg_metrics = evaluate_regression(y_reg_test, pred_reg)
+
+                # Load and evaluate classification
+                cls_pkl_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_cls.pkl")
+                cls_mlp_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_cls/")
+                if os.path.exists(cls_pkl_path):
+                    with open(cls_pkl_path, "rb") as f:
+                        cls_model = pickle.load(f)
+                    if model_name in ("xgboost", "lightgbm", "random_forest"):
+                        pred_cls = cls_model.predict(X_te_flat)
+                        prob_cls = cls_model.predict_proba(X_te_flat)
+                    elif model_name == "logistic":
+                        pred_cls = np.zeros_like(y_cls_test, dtype=float)
+                        prob_cls = np.zeros_like(y_cls_test, dtype=float)
+                        for t in range(n_tickers):
+                            pred_cls[:, t] = cls_model[t].predict(X_te_flat)
+                            prob_cls[:, t] = cls_model[t].predict_proba(X_te_flat)[:, 1]
+                        prob_cls = prob_cls
+                    else:
+                        continue
+                elif os.path.exists(cls_mlp_path):
+                    from ..tabular.mlp import predict_classifier, load_model as load_mlp_model
+                    cls_model = load_mlp_model(f"tabular_{model_name}_cls")
+                    pred_cls, prob_cls = predict_classifier(cls_model, X_te_flat)
+                else:
+                    pred_cls = None
+                    prob_cls = None
+
+                cls_metrics = evaluate_classification(y_cls_test, pred_cls, prob_cls) if pred_cls is not None else {}
+
+                results[f"tab_{model_name}"] = {
+                    "regression": reg_metrics,
+                    "classification": cls_metrics,
+                }
+
+                print(f"\n  {model_name.upper()} (test):")
+                print(f"    Regression  — RMSE: {reg_metrics['rmse']:.6f} | MAE: {reg_metrics['mae']:.6f} | R2: {reg_metrics['r2']:.4f}")
+                if cls_metrics:
+                    print(f"    Classification — F1: {cls_metrics.get('f1', 0):.4f} | Acc: {cls_metrics.get('accuracy', 0):.4f}")
+
+                mlflow.log_metric(f"eval_tab_{model_name}_rmse", reg_metrics["rmse"])
+                if cls_metrics:
+                    mlflow.log_metric(f"eval_tab_{model_name}_f1", cls_metrics.get("f1", 0))
+
+            except Exception as e:
+                print(f"  Error evaluating {model_name}: {e}")
+
+        # Save evaluation results
+        eval_path = os.path.join(MODELS_DIR, "evaluation_results.pkl")
+        with open(eval_path, "wb") as f:
+            pickle.dump(results, f)
+        print(f"\nEvaluation results saved to {eval_path}")
+
+        print("\n" + "=" * 60)
+        print("EVALUATION COMPLETE")
+        print("=" * 60)
+
+        return results
+    finally:
+        mlflow.end_run()
+
+
 def create_ensemble(ts_results, ts_best_name,
                     tab_reg_results, tab_reg_best,
                     tab_cls_results, tab_cls_best,
@@ -195,14 +483,13 @@ def create_ensemble(ts_results, ts_best_name,
     """
     n_tickers = len(TICKERS)
 
-    # Collect regression predictions
     reg_preds = []
 
     # Time series best
     ts_model = ts_results[ts_best_name]["model"]
     from ..timeseries.train import predict as ts_predict
     ts_loader = _make_loader(X_v_seq)
-    ts_reg, _ = ts_predict(ts_model, ts_loader)
+    ts_reg, ts_cls = ts_predict(ts_model, ts_loader)
     reg_preds.append(("ts", ts_reg))
 
     # Tabular regression best
@@ -218,14 +505,10 @@ def create_ensemble(ts_results, ts_best_name,
     reg_preds.append(("tab", tab_reg))
 
     # Weighted average (time series gets more weight)
-    weights = [0.6, 0.4]  # ts, tab
+    weights = [0.6, 0.4]
     ensemble_reg = sum(w * p for w, (_, p) in zip(weights, reg_preds))
 
-    # Collect classification predictions
     cls_preds = []
-
-    # Time series best
-    ts_cls = _[1]  # from ts_predict above
     cls_preds.append(("ts", ts_cls))
 
     # Tabular classification best
@@ -242,7 +525,7 @@ def create_ensemble(ts_results, ts_best_name,
         tab_cls_prob = np.zeros((X_v_flat.shape[0], n_t))
         for t, lr_m in tab_cls_model.items():
             tab_cls_pred[:, t], tab_cls_prob[:, t] = logistic.predict(lr_m, X_v_flat)
-        tab_cls_predict = None  # handled above
+        tab_cls_predict = None
     else:
         tab_cls_predict = None
 
@@ -250,7 +533,6 @@ def create_ensemble(ts_results, ts_best_name,
         tab_cls_pred, tab_cls_prob = tab_cls_predict(tab_cls_model, X_v_flat)
     cls_preds.append(("tab", tab_cls_pred))
 
-    # Majority voting
     ensemble_cls = (cls_preds[0][1] + cls_preds[1][1] > 1).astype(int)
 
     return {
@@ -272,55 +554,53 @@ def save_results(ts_results, tab_reg_results, tab_cls_results, ensemble,
     """Save all results to disk."""
     from ..timeseries.train import save_model as save_ts
 
-    results_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
-    os.makedirs(results_dir, exist_ok=True)
+    os.makedirs(MODELS_DIR, exist_ok=True)
 
     # Save best time series model
-    ts_model = ts_results[ts_best]["model"]
-    save_ts(ts_model, f"timeseries_{ts_best}", ts_results[ts_best]["model"].reg_head.in_features)
+    if ts_best and ts_results:
+        ts_model = ts_results[ts_best]["model"]
+        save_ts(ts_model, f"timeseries_{ts_best}", ts_results[ts_best]["model"].reg_head.in_features)
 
     # Save tabular models
-    for name, res in tab_reg_results.items():
-        if name.startswith("_"):
-            continue
-        model = res["model"]
-        if name in ("xgboost", "lightgbm", "random_forest"):
-            import pickle
-            with open(os.path.join(results_dir, f"tabular_{name}_reg.pkl"), "wb") as f:
-                pickle.dump(model, f)
-        elif name == "mlp":
-            from ..tabular.mlp import save_model as save_mlp
-            save_mlp(model, f"tabular_{name}_reg", model.net[0].in_features,
-                     [m.out_features for m in model.net if hasattr(m, 'out_features')], 20)
-        elif name == "ridge":
-            import pickle
-            with open(os.path.join(results_dir, f"tabular_{name}_reg.pkl"), "wb") as f:
-                pickle.dump(model, f)
+    if tab_reg_results:
+        for name, res in tab_reg_results.items():
+            if name.startswith("_"):
+                continue
+            model = res["model"]
+            if name in ("xgboost", "lightgbm", "random_forest"):
+                with open(os.path.join(MODELS_DIR, f"tabular_{name}_reg.pkl"), "wb") as f:
+                    pickle.dump(model, f)
+            elif name == "mlp":
+                from ..tabular.mlp import save_model as save_mlp
+                save_mlp(model, f"tabular_{name}_reg", model.net[0].in_features,
+                         [m.out_features for m in model.net if hasattr(m, 'out_features')], 20)
+            elif name == "ridge":
+                with open(os.path.join(MODELS_DIR, f"tabular_{name}_reg.pkl"), "wb") as f:
+                    pickle.dump(model, f)
 
-    for name, res in tab_cls_results.items():
-        if name.startswith("_"):
-            continue
-        model = res["model"]
-        if name in ("xgboost", "lightgbm", "random_forest"):
-            import pickle
-            with open(os.path.join(results_dir, f"tabular_{name}_cls.pkl"), "wb") as f:
-                pickle.dump(model, f)
-        elif name == "mlp":
-            from ..tabular.mlp import save_model as save_mlp
-            save_mlp(model, f"tabular_{name}_cls", model.net[0].in_features,
-                     [m.out_features for m in model.net if hasattr(m, 'out_features')], 5, is_classifier=True)
-        elif name == "logistic":
-            import pickle
-            with open(os.path.join(results_dir, f"tabular_{name}_cls.pkl"), "wb") as f:
-                pickle.dump(model, f)
+    if tab_cls_results:
+        for name, res in tab_cls_results.items():
+            if name.startswith("_"):
+                continue
+            model = res["model"]
+            if name in ("xgboost", "lightgbm", "random_forest"):
+                with open(os.path.join(MODELS_DIR, f"tabular_{name}_cls.pkl"), "wb") as f:
+                    pickle.dump(model, f)
+            elif name == "mlp":
+                from ..tabular.mlp import save_model as save_mlp
+                save_mlp(model, f"tabular_{name}_cls", model.net[0].in_features,
+                         [m.out_features for m in model.net if hasattr(m, 'out_features')], 5, is_classifier=True)
+            elif name == "logistic":
+                with open(os.path.join(MODELS_DIR, f"tabular_{name}_cls.pkl"), "wb") as f:
+                    pickle.dump(model, f)
 
     # Save feature names
-    with open(os.path.join(results_dir, "feature_names.pkl"), "wb") as f:
+    with open(os.path.join(MODELS_DIR, "feature_names.pkl"), "wb") as f:
         pickle.dump(feature_names, f)
 
     # Save ensemble
-    import pickle
-    with open(os.path.join(results_dir, "ensemble.pkl"), "wb") as f:
-        pickle.dump(ensemble, f)
+    if ensemble:
+        with open(os.path.join(MODELS_DIR, "ensemble.pkl"), "wb") as f:
+            pickle.dump(ensemble, f)
 
-    print(f"  All models saved to {results_dir}")
+    print(f"  All models saved to {MODELS_DIR}")
