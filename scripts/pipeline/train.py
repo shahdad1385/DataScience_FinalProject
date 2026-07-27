@@ -271,16 +271,21 @@ def train_all_models(verbose=True, model_filter=None, epochs=100, lr=1e-3,
         mlflow.end_run()
 
 
-def evaluate_saved_models(model_filter=None):
+def evaluate_saved_models(model_filter=None, eval_flags=None):
     """
     Load saved models and evaluate on test set.
 
     Args:
         model_filter: if set, only evaluate this model
+        eval_flags: dict of evaluation flags (detailed, confusion, trading, etc.)
     """
+    if eval_flags is None:
+        eval_flags = {}
     print("\n" + "=" * 60)
     print("EVALUATION MODE — Loading saved models")
     print("=" * 60)
+    if any(eval_flags.values()):
+        print(f"  Evaluation flags enabled: {[k for k, v in eval_flags.items() if v]}")
 
     # Load test data
     X_train, y_reg_train, y_cls_train, feature_names, _ = prepare_data("train")
@@ -461,6 +466,29 @@ def evaluate_saved_models(model_filter=None):
         with open(eval_path, "wb") as f:
             pickle.dump(results, f)
         print(f"\nEvaluation results saved to {eval_path}")
+
+        # Run detailed evaluation if any flags enabled
+        if eval_flags and any(eval_flags.values()):
+            print("\n" + "=" * 60)
+            print("DETAILED EVALUATION")
+            print("=" * 60)
+            try:
+                from .evaluate import run_detailed_evaluation
+                run_detailed_evaluation(
+                    results=results,
+                    X_test=X_test,
+                    y_reg_test=y_reg_test,
+                    y_cls_test=y_cls_test,
+                    X_te_seq=X_te_seq,
+                    X_te_flat=X_te_flat,
+                    df_test=df_test,
+                    feature_names=feature_names,
+                    eval_flags=eval_flags,
+                )
+            except Exception as e:
+                print(f"  Detailed evaluation error: {e}")
+                import traceback
+                traceback.print_exc()
 
         print("\n" + "=" * 60)
         print("EVALUATION COMPLETE")
