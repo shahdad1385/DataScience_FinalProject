@@ -166,6 +166,36 @@ pip install -r requirements.txt
 python pipeline.py
 ```
 
+### Evaluation Flags (Phase 2+)
+
+The evaluation mode supports extended analysis flags:
+
+| Flag | Description |
+|------|-------------|
+| `--eval-detailed` | Per-ticker & per-output metrics breakdown (RMSE, MAE, R², F1, AUC per ticker/output) |
+| `--eval-confusion` | Save confusion matrices as PNG heatmaps + CSV per ticker |
+| `--eval-trading` | Trading simulation: Sharpe, Sortino, Max Drawdown, Hit Rate, Profit Factor |
+| `--eval-feature-imp` | Feature importance for tree models (XGBoost, LightGBM, RF); permutation for others |
+| `--eval-statistical` | Diebold-Mariano test vs naive baseline; permutation importance |
+| `--eval-calibration` | Reliability diagrams / calibration curves for classifiers |
+| `--eval-save-preds` | Save raw predictions + probabilities to CSV |
+| `--eval-save-plots` | Save all evaluation plots to `models/eval_plots/` |
+| `--eval-ensemble` | Evaluate ensemble predictions if available |
+
+**Examples:**
+```bash
+# Full detailed evaluation with confusion matrices and trading metrics
+python pipeline.py --mode evaluate --eval-detailed --eval-confusion --eval-trading
+
+# Evaluate only XGBoost with feature importance
+python pipeline.py --mode evaluate --model xgboost --eval-feature-imp --eval-confusion
+
+# Save all predictions and plots
+python pipeline.py --mode evaluate --eval-save-preds --eval-save-plots --eval-detailed
+```
+
+### Pipeline Usage Examples
+
 The pipeline executes in this order:
 
 | Step | Script | Description |
