@@ -91,6 +91,65 @@ def _validate(model, loader, device):
     return _val(model, loader, device)
 
 
+def train_single(model_name, X_train, y_reg_train, y_cls_train,
+                 X_val, y_reg_val, y_cls_val,
+                 seq_len=30, n_tickers=5, lr=1e-3, epochs=100,
+                 patience=10, batch_size=64, hidden_size=64,
+                 n_layers=2, dropout=0.2, verbose=True):
+    """
+    Train a single time series model with custom hyperparameters.
+
+    Args:
+        model_name: one of lstm, gru, transformer, bilstm, tcn
+        hidden_size: hidden dimension size
+        n_layers: number of layers
+        dropout: dropout rate
+    """
+    device = get_device()
+    input_size = X_train.shape[1]
+
+    model_modules = {
+        "lstm": lstm, "gru": gru, "transformer": transformer,
+        "bilstm": bilstm, "tcn": tcn,
+    }
+
+    if model_name not in model_modules:
+        raise ValueError(f"Unknown model: {model_name}")
+
+    mod = model_modules[model_name]
+    extra_kwargs = {}
+    if model_name in ("transformer", "tcn"):
+        extra_kwargs["nhead"] = 4
+
+    model = mod.create_model(
+        input_size, hidden_size=hidden_size, n_layers=n_layers,
+        dropout=dropout, n_tickers=n_tickers, **extra_kwargs,
+    )
+
+    train_loader, val_loader, _ = create_dataloaders(
+        X_train, y_reg_train, y_cls_train,
+        X_val, y_reg_val, y_cls_val,
+        X_val, y_reg_val, y_cls_val,
+        seq_len=seq_len, batch_size=batch_size,
+    )
+
+    if verbose:
+        print(f"\n{'='*40}")
+        print(f"  Training {model_name.upper()}")
+        print(f"  hidden={hidden_size}, layers={n_layers}, dropout={dropout}, lr={lr:.2e}")
+        print(f"{'='*40}")
+
+    model, hist = train_model(
+        model, train_loader, val_loader,
+        lr=lr, epochs=epochs, patience=patience,
+        device=device, verbose=verbose,
+    )
+
+    val_loss, val_preds = _validate(model, val_loader, device)
+
+    return {"model": model, "history": hist, "val_loss": val_loss, "val_preds": val_preds}
+
+
 def select_best(results):
     """Pick the best model by validation loss."""
     best_name = min(results, key=lambda k: results[k]["val_loss"])
