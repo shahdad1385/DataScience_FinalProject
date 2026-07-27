@@ -1,0 +1,197 @@
+"""
+Shared training loop for all time series models.
+
+Handles: mixed precision, combined loss, early stopping, hyperparameter search.
+Works with LSTM, GRU, and Transformer — they all have the same forward() signature.
+"""
+
+import os
+import time
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.cuda.amp import autocast, GradScaler
+
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+
+
+def get_device():
+    """Get best available device."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def combined_loss(reg_pred, cls_pred, reg_target, cls_target, reg_weight=0.5, cls_weight=0.5):
+    """
+    Combined loss: MSE for OHLC regression + BCE for direction classification.
+    """
+    reg_loss = nn.MSELoss()(reg_pred, reg_target)
+    cls_loss = nn.BCELoss()(cls_pred, cls_target)
+    return reg_weight * reg_loss + cls_weight * cls_loss, reg_loss.item(), cls_loss.item()
+
+
+def train_one_epoch(model, loader, optimizer, device, use_amp=True):
+    """Train for one epoch. Returns average loss."""
+    model.train()
+    scaler = GradScaler(enabled=use_amp and device.type == "cuda")
+    total_loss = 0
+    n_batches = 0
+
+    for x, y_reg, y_cls in loader:
+        x = x.to(device)
+        y_reg = y_reg.to(device)
+        y_cls = y_cls.to(device)
+
+        optimizer.zero_grad()
+        with autocast(enabled=use_amp and device.type == "cuda"):
+            reg_pred, cls_pred = model(x)
+            loss, _, _ = combined_loss(reg_pred, cls_pred, y_reg, y_cls)
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        total_loss += loss.item()
+        n_batches += 1
+
+    return total_loss / max(n_batches, 1)
+
+
+def validate(model, loader, device):
+    """Validate model. Returns average loss and predictions."""
+    model.eval()
+    total_loss = 0
+    n_batches = 0
+    all_reg_pred, all_cls_pred = [], []
+    all_reg_true, all_cls_true = [], []
+
+    with torch.no_grad():
+        for x, y_reg, y_cls in loader:
+            x = x.to(device)
+            y_reg = y_reg.to(device)
+            y_cls = y_cls.to(device)
+
+            reg_pred, cls_pred = model(x)
+            loss, _, _ = combined_loss(reg_pred, cls_pred, y_reg, y_cls)
+
+            total_loss += loss.item()
+            n_batches += 1
+
+            all_reg_pred.append(reg_pred.cpu().numpy())
+            all_cls_pred.append(cls_pred.cpu().numpy())
+            all_reg_true.append(y_reg.cpu().numpy())
+            all_cls_true.append(y_cls.cpu().numpy())
+
+    avg_loss = total_loss / max(n_batches, 1)
+    return avg_loss, (
+        np.concatenate(all_reg_pred),
+        np.concatenate(all_cls_pred),
+        np.concatenate(all_reg_true),
+        np.concatenate(all_cls_true),
+    )
+
+
+def train_model(model, train_loader, val_loader, lr=1e-3, epochs=100,
+                patience=10, device=None, use_amp=True, verbose=True):
+    """
+    Full training loop with early stopping.
+
+    Args:
+        model: any model with forward() returning (reg, cls)
+        train_loader: training DataLoader
+        val_loader: validation DataLoader
+        lr: learning rate
+        epochs: maximum epochs
+        patience: early stopping patience
+        device: torch device (auto-detected if None)
+        use_amp: use mixed precision on GPU
+        verbose: print progress
+
+    Returns:
+        best_model, history dict
+    """
+    if device is None:
+        device = get_device()
+    model = model.to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+
+    best_val_loss = float("inf")
+    best_state = None
+    wait = 0
+    history = {"train_loss": [], "val_loss": []}
+
+    for epoch in range(epochs):
+        t0 = time.time()
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, use_amp)
+        val_loss, _ = validate(model, val_loader, device)
+        scheduler.step(val_loss)
+        dt = time.time() - t0
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+
+        if verbose and (epoch % 10 == 0 or epoch == epochs - 1):
+            print(f"  Epoch {epoch:3d} | train: {train_loss:.6f} | val: {val_loss:.6f} | {dt:.1f}s")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            wait = 0
+        else:
+            wait += 1
+            if wait >= patience:
+                if verbose:
+                    print(f"  Early stopping at epoch {epoch}")
+                break
+
+    # Load best model
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    model = model.to("cpu")
+
+    return model, history
+
+
+def save_model(model, name, input_size, **kwargs):
+    """Save trained model to disk."""
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    path = os.path.join(MODELS_DIR, f"{name}.pt")
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "input_size": input_size,
+        "kwargs": kwargs,
+    }, path)
+    return path
+
+
+def load_model(model_class, name, device="cpu"):
+    """Load trained model from disk."""
+    path = os.path.join(MODELS_DIR, f"{name}.pt")
+    checkpoint = torch.load(path, map_location=device)
+    model = model_class(
+        input_size=checkpoint["input_size"],
+        **checkpoint["kwargs"],
+    )
+    model.load_state_dict(checkpoint["model_state_dict"])
+    return model
+
+
+def predict(model, loader, device=None):
+    """Run inference on a DataLoader. Returns (reg_pred, cls_pred)."""
+    if device is None:
+        device = get_device()
+    model = model.to(device)
+    model.eval()
+
+    all_reg, all_cls = [], []
+    with torch.no_grad():
+        for x, _, _ in loader:
+            x = x.to(device)
+            reg, cls = model(x)
+            all_reg.append(reg.cpu().numpy())
+            all_cls.append(cls.cpu().numpy())
+
+    return np.concatenate(all_reg), np.concatenate(all_cls)
