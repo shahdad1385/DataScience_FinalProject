@@ -64,6 +64,7 @@ Examples:
     )
     parser.add_argument("--trials", type=int, default=50, help="Optuna trials for finetune mode")
     parser.add_argument("--skip-nlp", action="store_true", help="Skip NLP feature extraction")
+    parser.add_argument("--skip-clustering", action="store_true", help="Skip clustering step")
     parser.add_argument("--epochs", type=int, default=100, help="Max training epochs")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
@@ -110,14 +111,7 @@ Examples:
         run_preprocessing()
 
     if args.mode in ("train", "full"):
-        train_all_models(
-            verbose=args.verbose,
-            model_filter=args.model,
-            epochs=args.epochs,
-            lr=args.lr,
-            patience=args.patience,
-            skip_nlp=args.skip_nlp,
-        )
+        run_pipeline(skip_nlp=args.skip_nlp, skip_clustering=args.skip_clustering)
         evaluate_saved_models(model_filter=args.model, eval_flags=eval_flags)
 
     elif args.mode == "finetune":
