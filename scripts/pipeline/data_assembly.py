@@ -80,6 +80,19 @@ def load_split_features(split):
     except Exception:
         pass
 
+    # Clustering features
+    try:
+        kw_cluster = load_table(f"{split}_cluster_keyword")
+        features[f"{split}_kw_cluster"] = kw_cluster
+    except Exception:
+        pass
+
+    try:
+        sent_cluster = load_table(f"{split}_cluster_sentiment")
+        features[f"{split}_sent_cluster"] = sent_cluster
+    except Exception:
+        pass
+
     return features
 
 
