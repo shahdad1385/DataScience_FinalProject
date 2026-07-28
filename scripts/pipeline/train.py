@@ -254,6 +254,14 @@ def train_all_models(verbose=True, model_filter=None, epochs=100, lr=1e-3,
         save_results(ts_results, tab_reg_results, tab_cls_results, ensemble,
                      ts_best_name, tab_reg_best, tab_cls_best, feature_names)
 
+        # Save best model selection JSON
+        selection = save_best_model_selection(
+            ts_best_name, ts_results,
+            tab_reg_best, tab_reg_results,
+            tab_cls_best, tab_cls_results,
+            feature_names,
+        )
+
         print("\n" + "=" * 60)
         print("TRAINING COMPLETE")
         print("=" * 60)
@@ -275,6 +283,9 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
     """
     Load saved models and evaluate on test set.
 
+    Uses best_model_selection.json to load only the best model per category.
+    Falls back to loading all models if JSON not found.
+
     Args:
         model_filter: if set, only evaluate this model
         eval_flags: dict of evaluation flags (detailed, confusion, trading, etc.)
@@ -286,6 +297,25 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
     print("=" * 60)
     if any(eval_flags.values()):
         print(f"  Evaluation flags enabled: {[k for k, v in eval_flags.items() if v]}")
+
+    # Load best model selection
+    selection = load_best_model_selection()
+    if selection:
+        print(f"  Loaded best model selection from JSON")
+        ts_best_name = selection.get("timeseries", {}).get("best_model")
+        tab_reg_best_name = selection.get("tabular_regression", {}).get("best_model")
+        tab_cls_best_name = selection.get("tabular_classification", {}).get("best_model")
+        if ts_best_name:
+            print(f"    Best time series: {ts_best_name}")
+        if tab_reg_best_name:
+            print(f"    Best tabular regression: {tab_reg_best_name}")
+        if tab_cls_best_name:
+            print(f"    Best tabular classification: {tab_cls_best_name}")
+    else:
+        print(f"  No best_model_selection.json found, loading all available models")
+        ts_best_name = None
+        tab_reg_best_name = None
+        tab_cls_best_name = None
 
     # Load test data
     X_train, y_reg_train, y_cls_train, feature_names, _ = prepare_data("train")
@@ -319,14 +349,18 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
         mlflow.log_param("mode", "evaluate")
         mlflow.log_param("n_samples_test", X_test.shape[0])
 
-        # Evaluate time series models
-        ts_models = ["lstm", "gru", "transformer", "bilstm", "tcn"]
-        if model_filter and model_filter in ts_models:
-            ts_models = [model_filter]
-        elif model_filter and model_filter not in ts_models:
-            ts_models = []
+        # Determine which time series models to evaluate
+        ts_models_to_evaluate = []
+        if model_filter:
+            ts_model_names = ["lstm", "gru", "transformer", "bilstm", "tcn"]
+            if model_filter in ts_model_names:
+                ts_models_to_evaluate = [model_filter]
+        elif ts_best_name:
+            ts_models_to_evaluate = [ts_best_name]
+        else:
+            ts_models_to_evaluate = ["lstm", "gru", "transformer", "bilstm", "tcn"]
 
-        for model_name in ts_models:
+        for model_name in ts_models_to_evaluate:
             try:
                 model_path = os.path.join(MODELS_DIR, f"timeseries_{model_name}.pt")
                 if not os.path.exists(model_path):
@@ -378,14 +412,21 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
             except Exception as e:
                 print(f"  Error evaluating {model_name}: {e}")
 
-        # Evaluate tabular models
-        tab_models = ["xgboost", "random_forest", "lightgbm", "mlp", "ridge", "logistic"]
-        if model_filter and model_filter in tab_models:
-            tab_models = [model_filter]
-        elif model_filter and model_filter not in tab_models:
-            tab_models = []
+        # Determine which tabular models to evaluate
+        tab_models_to_evaluate = []
+        if model_filter:
+            tab_model_names = ["xgboost", "random_forest", "lightgbm", "mlp", "ridge", "logistic"]
+            if model_filter in tab_model_names:
+                tab_models_to_evaluate = [model_filter]
+        else:
+            if tab_reg_best_name:
+                tab_models_to_evaluate.append(tab_reg_best_name)
+            if tab_cls_best_name and tab_cls_best_name != tab_reg_best_name:
+                tab_models_to_evaluate.append(tab_cls_best_name)
+            if not tab_models_to_evaluate:
+                tab_models_to_evaluate = ["xgboost", "random_forest", "lightgbm", "mlp", "ridge", "logistic"]
 
-        for model_name in tab_models:
+        for model_name in tab_models_to_evaluate:
             try:
                 pkl_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_reg.pkl")
                 mlp_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_reg/")
@@ -584,10 +625,12 @@ def save_results(ts_results, tab_reg_results, tab_cls_results, ensemble,
 
     os.makedirs(MODELS_DIR, exist_ok=True)
 
-    # Save best time series model
-    if ts_best and ts_results:
-        ts_model = ts_results[ts_best]["model"]
-        save_ts(ts_model, f"timeseries_{ts_best}", ts_results[ts_best]["model"].reg_head.in_features)
+    # Save ALL time series models
+    if ts_results:
+        for name, res in ts_results.items():
+            model = res["model"]
+            input_size = model.reg_head.in_features
+            save_ts(model, f"timeseries_{name}", input_size)
 
     # Save tabular models
     if tab_reg_results:
@@ -632,3 +675,58 @@ def save_results(ts_results, tab_reg_results, tab_cls_results, ensemble,
             pickle.dump(ensemble, f)
 
     print(f"  All models saved to {MODELS_DIR}")
+
+
+def save_best_model_selection(ts_best, ts_results, tab_reg_best, tab_reg_results,
+                              tab_cls_best, tab_cls_results, feature_names):
+    """Save best model selection to JSON for evaluate mode."""
+    import json
+
+    selection = {
+        "timeseries": {},
+        "tabular_regression": {},
+        "tabular_classification": {},
+        "features": {
+            "n_features": len(feature_names),
+            "feature_names_file": "feature_names.pkl",
+        }
+    }
+
+    if ts_best and ts_results and ts_best in ts_results:
+        selection["timeseries"] = {
+            "best_model": ts_best,
+            "val_loss": float(ts_results[ts_best].get("val_loss", 0)),
+            "weights_file": f"timeseries_{ts_best}.pt",
+        }
+
+    if tab_reg_best and tab_reg_results and tab_reg_best in tab_reg_results:
+        reg_metrics = tab_reg_results[tab_reg_best].get("overall", {})
+        selection["tabular_regression"] = {
+            "best_model": tab_reg_best,
+            "rmse": float(reg_metrics.get("rmse", 0)),
+            "weights_file": f"tabular_{tab_reg_best}_reg.pkl" if tab_reg_best != "mlp" else "tabular_mlp_reg/",
+        }
+
+    if tab_cls_best and tab_cls_results and tab_cls_best in tab_cls_results:
+        cls_metrics = tab_cls_results[tab_cls_best].get("overall", {})
+        selection["tabular_classification"] = {
+            "best_model": tab_cls_best,
+            "f1": float(cls_metrics.get("f1", 0)),
+            "weights_file": f"tabular_{tab_cls_best}_cls.pkl" if tab_cls_best != "mlp" else "tabular_mlp_cls/",
+        }
+
+    path = os.path.join(MODELS_DIR, "best_model_selection.json")
+    with open(path, "w") as f:
+        json.dump(selection, f, indent=2)
+    print(f"  Best model selection saved to {path}")
+    return selection
+
+
+def load_best_model_selection():
+    """Load best model selection from JSON."""
+    import json
+    path = os.path.join(MODELS_DIR, "best_model_selection.json")
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return None
