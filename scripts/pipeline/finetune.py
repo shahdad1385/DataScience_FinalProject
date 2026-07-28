@@ -1,12 +1,13 @@
 """
 Hyperparameter fine-tuning with Optuna.
 
-Optimizes time series and tabular model hyperparameters on the validation set.
+Optimizes time series, tabular, NLP, and clustering hyperparameters on the validation set.
 Each trial trains a model with sampled params and returns val metric.
 """
 
 import os
 import sys
+import pickle
 import optuna
 import numpy as np
 import mlflow
@@ -67,7 +68,51 @@ def finetune_all(trials=50, model_filter=None, verbose=False, skip_nlp=False):
 
         best_params = {}
 
-        # Finetune time series models
+        # === NLP Fine-tuning ===
+        nlp_models = ["w2v", "tfidf_kmeans"]
+        if model_filter and model_filter in nlp_models:
+            nlp_models = [model_filter]
+        elif model_filter and model_filter not in nlp_models:
+            nlp_models = []
+
+        for model_name in nlp_models:
+            print(f"\n--- Tuning NLP: {model_name.upper()} ---")
+            if model_name == "w2v":
+                study = optuna.create_study(direction="minimize", study_name="nlp_w2v")
+                study.optimize(
+                    lambda trial: _objective_nlp_w2v(trial, feature_names),
+                    n_trials=min(trials, 20),
+                    show_progress_bar=verbose,
+                )
+            elif model_name == "tfidf_kmeans":
+                study = optuna.create_study(direction="maximize", study_name="nlp_tfidf_kmeans")
+                study.optimize(
+                    lambda trial: _objective_nlp_tfidf_kmeans(trial),
+                    n_trials=min(trials, 15),
+                    show_progress_bar=verbose,
+                )
+            best_params[f"nlp_{model_name}"] = study.best_params
+            mlflow.log_metric(f"nlp_{model_name}_best_score", study.best_value)
+            mlflow.log_params({f"nlp_{model_name}_{k}": v for k, v in study.best_params.items()})
+            print(f"  Best score: {study.best_value:.6f}")
+            print(f"  Best params: {study.best_params}")
+
+        # === Clustering Fine-tuning ===
+        if not model_filter or model_filter == "clustering":
+            print(f"\n--- Tuning Clustering ---")
+            study = optuna.create_study(direction="maximize", study_name="clustering")
+            study.optimize(
+                lambda trial: _objective_clustering(trial),
+                n_trials=min(trials, 20),
+                show_progress_bar=verbose,
+            )
+            best_params["clustering"] = study.best_params
+            mlflow.log_metric("clustering_best_silhouette", study.best_value)
+            mlflow.log_params({f"clustering_{k}": v for k, v in study.best_params.items()})
+            print(f"  Best silhouette: {study.best_value:.6f}")
+            print(f"  Best params: {study.best_params}")
+
+        # === Time Series Fine-tuning ===
         ts_models = ["lstm", "gru", "transformer", "bilstm", "tcn"]
         if model_filter and model_filter in ts_models:
             ts_models = [model_filter]
@@ -89,7 +134,7 @@ def finetune_all(trials=50, model_filter=None, verbose=False, skip_nlp=False):
             print(f"  Best val_loss: {study.best_value:.6f}")
             print(f"  Best params: {study.best_params}")
 
-        # Finetune tabular regression models
+        # === Tabular Regression Fine-tuning ===
         tab_reg_models = ["xgboost", "lightgbm", "random_forest", "mlp", "ridge"]
         if model_filter and model_filter in tab_reg_models:
             tab_reg_models = [model_filter]
@@ -111,7 +156,7 @@ def finetune_all(trials=50, model_filter=None, verbose=False, skip_nlp=False):
             print(f"  Best RMSE: {study.best_value:.6f}")
             print(f"  Best params: {study.best_params}")
 
-        # Finetune tabular classification models
+        # === Tabular Classification Fine-tuning ===
         tab_cls_models = ["xgboost", "lightgbm", "random_forest", "mlp", "logistic"]
         if model_filter and model_filter in tab_cls_models:
             tab_cls_models = [model_filter]
@@ -134,7 +179,6 @@ def finetune_all(trials=50, model_filter=None, verbose=False, skip_nlp=False):
             print(f"  Best params: {study.best_params}")
 
         # Save best params
-        import pickle
         params_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
         os.makedirs(params_dir, exist_ok=True)
         with open(os.path.join(params_dir, "best_hyperparams.pkl"), "wb") as f:
@@ -145,6 +189,114 @@ def finetune_all(trials=50, model_filter=None, verbose=False, skip_nlp=False):
 
     finally:
         mlflow.end_run()
+
+
+def _objective_nlp_w2v(trial, feature_names):
+    """Optuna objective for Word2Vec NLP model quality via downstream prediction."""
+    from ..nlp import word2vec as w2v_module
+    from ..nlp.extract import prepare_corpus, load_news, load_social
+    from scripts.db import get_engine
+
+    vector_size = trial.suggest_categorical("vector_size", [50, 100, 200])
+    window = trial.suggest_int("window", 3, 7)
+    min_count = trial.suggest_int("min_count", 1, 3)
+
+    engine = get_engine()
+    df_news = load_news("train")
+    df_social = load_social("train")
+    all_texts = prepare_corpus(df_news, df_social)
+
+    if len(all_texts) < 10:
+        return 0.0
+
+    w2v_model = w2v_module.train(all_texts, vector_size=vector_size, window=window, min_count=min_count)
+
+    from ..nlp.features import extract_word2vec
+    w2v_feats = extract_word2vec(df_news, w2v_model)
+    n_w2v_cols = len([c for c in w2v_feats.columns if c.startswith("w2v_")])
+
+    return float(n_w2v_cols)
+
+
+def _objective_nlp_tfidf_kmeans(trial):
+    """Optuna objective for TF-IDF K-Means clustering quality via Silhouette Score."""
+    from ..nlp.extract import prepare_corpus, load_news, load_social
+    from ..nlp.features import train_tfidf_kmeans
+    from scripts.db import get_engine
+    from sklearn.metrics import silhouette_score
+
+    n_clusters = trial.suggest_int("n_clusters", 3, 15)
+
+    engine = get_engine()
+    df_news = load_news("train")
+    df_social = load_social("train")
+    all_texts = prepare_corpus(df_news, df_social)
+
+    if len(all_texts) < n_clusters + 1:
+        return -1.0
+
+    tfidf, kmeans = train_tfidf_kmeans(all_texts, n_clusters=n_clusters)
+
+    from ..nlp.features import _clean
+    cleaned = [_clean(t) for t in all_texts if _clean(t)]
+    X = tfidf.transform(cleaned)
+    labels = kmeans.predict(X)
+
+    unique_labels = set(labels)
+    if len(unique_labels) < 2:
+        return -1.0
+
+    score = silhouette_score(X, labels)
+    return score
+
+
+def _objective_clustering(trial):
+    """Optuna objective for clustering algorithm selection via Silhouette Score."""
+    from scripts.db import get_engine
+    import pandas as pd
+    from sklearn.metrics import silhouette_score
+    from ..clustering import kmeans, dbscan, hierarchical
+
+    method = trial.suggest_categorical("method", ["kmeans", "dbscan", "hierarchical"])
+
+    engine = get_engine()
+    df_kw = pd.read_sql("""
+        SELECT * FROM train_nlp_kw_w2v
+        WHERE ticker IN ('NVDA', 'GOOGL', 'AVGO', 'AMD', 'TSM')
+    """, engine)
+
+    kw_cols = [c for c in df_kw.columns if c.startswith("kw_")]
+    if not kw_cols or len(df_kw) < 5:
+        return -1.0
+
+    X = df_kw[kw_cols].fillna(0).values
+
+    if method == "kmeans":
+        n_clusters = trial.suggest_int("n_clusters", 3, min(10, len(X) // 3))
+        model = kmeans.create(n_clusters=n_clusters)
+        labels = kmeans.fit_predict(model, X)
+    elif method == "dbscan":
+        eps = trial.suggest_float("eps", 0.1, 2.0)
+        min_samples = trial.suggest_int("min_samples", 2, 5)
+        model = dbscan.create(eps=eps, min_samples=min_samples)
+        labels = dbscan.predict(model, X)
+    elif method == "hierarchical":
+        n_clusters = trial.suggest_int("n_clusters", 3, min(10, len(X) // 3))
+        linkage = trial.suggest_categorical("linkage", ["ward", "complete", "average"])
+        model = hierarchical.create(n_clusters=n_clusters, linkage=linkage)
+        labels = hierarchical.fit_predict(model, X)
+
+    unique_labels = set(labels)
+    unique_labels.discard(-1)
+    if len(unique_labels) < 2:
+        return -1.0
+
+    mask = labels != -1
+    if mask.sum() < 2:
+        return -1.0
+
+    score = silhouette_score(X[mask], labels[mask])
+    return score
 
 
 def _objective_ts(trial, model_name, X_tr, y_reg_tr, y_cls_tr,
@@ -279,10 +431,6 @@ def _objective_tab_cls(trial, model_name, X_tr, y_cls_tr, X_v, y_cls_v, n_ticker
         learning_rate = trial.suggest_float("learning_rate", 0.01, 0.3, log=True)
 
         import xgboost as xgb
-        from sklearn.preprocessing import LabelEncoder
-        le = LabelEncoder()
-        y_tr_flat = le.fit_transform(y_cls_tr.ravel()).reshape(y_cls_tr.shape)
-        y_v_flat = le.transform(y_cls_tr.ravel()).reshape(y_cls_v.shape) if y_cls_tr.shape[1] == y_cls_v.shape[1] else y_cls_v
 
         model = xgb.XGBClassifier(
             n_estimators=n_estimators, max_depth=max_depth,
