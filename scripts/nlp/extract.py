@@ -36,6 +36,57 @@ TICKERS = ["NVDA", "GOOGL", "AVGO", "AMD", "TSM"]
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 
 
+def save_nlp_models(models):
+    """Save all NLP models to disk."""
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    if "lda" in models:
+        with open(os.path.join(MODELS_DIR, "lda.pkl"), "wb") as f:
+            pickle.dump(models["lda"], f)
+    if "lda_vec" in models:
+        with open(os.path.join(MODELS_DIR, "lda_vec.pkl"), "wb") as f:
+            pickle.dump(models["lda_vec"], f)
+    if "tfidf" in models:
+        with open(os.path.join(MODELS_DIR, "tfidf.pkl"), "wb") as f:
+            pickle.dump(models["tfidf"], f)
+    if "kmeans" in models:
+        with open(os.path.join(MODELS_DIR, "tfidf_kmeans.pkl"), "wb") as f:
+            pickle.dump(models["kmeans"], f)
+    if "bert" in models and "bert_pca" in models:
+        bert_module.save_artifacts(models["bert"], models["bert_pca"])
+    print(f"  NLP models saved to {MODELS_DIR}")
+
+
+def load_nlp_models():
+    """Load all NLP models from disk."""
+    models = {}
+    w2v_path = os.path.join(MODELS_DIR, "word2vec.model")
+    if os.path.exists(w2v_path):
+        models["w2v"] = w2v_module.load()
+    lda_path = os.path.join(MODELS_DIR, "lda.pkl")
+    if os.path.exists(lda_path):
+        with open(lda_path, "rb") as f:
+            models["lda"] = pickle.load(f)
+    lda_vec_path = os.path.join(MODELS_DIR, "lda_vec.pkl")
+    if os.path.exists(lda_vec_path):
+        with open(lda_vec_path, "rb") as f:
+            models["lda_vec"] = pickle.load(f)
+    tfidf_path = os.path.join(MODELS_DIR, "tfidf.pkl")
+    if os.path.exists(tfidf_path):
+        with open(tfidf_path, "rb") as f:
+            models["tfidf"] = pickle.load(f)
+    kmeans_path = os.path.join(MODELS_DIR, "tfidf_kmeans.pkl")
+    if os.path.exists(kmeans_path):
+        with open(kmeans_path, "rb") as f:
+            models["kmeans"] = pickle.load(f)
+    bert_model_path = os.path.join(MODELS_DIR, "bert_model")
+    if os.path.exists(bert_model_path) and bert_module.HAS_SENTENCE_TRANSFORMERS:
+        try:
+            models["bert"], models["bert_pca"] = bert_module.load_artifacts()
+        except Exception:
+            pass
+    return models
+
+
 def load_news(split):
     tf = ", ".join(f"'{t}'" for t in TICKERS)
     return pd.read_sql(f"""
@@ -117,22 +168,29 @@ def process_split(split, models=None):
         w2v_model = w2v_module.train(all_texts)
         w2v_module.save(w2v_model)
         models["w2v"] = w2v_model
-    else:
-        w2v_model = models["w2v"]
+    elif "w2v" not in models:
+        models["w2v"] = w2v_module.load()
+    w2v_model = models["w2v"]
     create_table(split, extract_keywords_w2v(df_news, w2v_model), f"{split}_nlp_kw_w2v")
 
     # 4. Keywords (BERT-based)
     if bert_module.HAS_SENTENCE_TRANSFORMERS:
         print(f"  [4/11] Keywords (BERT)...")
         if split == "train":
-            bert_model, bert_pca = bert_module.load_artifacts() if os.path.exists(
-                os.path.join(MODELS_DIR, "bert_model")) else (None, None)
-            if bert_model is None:
+            if os.path.exists(os.path.join(MODELS_DIR, "bert_model")):
+                bert_model, bert_pca = bert_module.load_artifacts()
+            else:
                 bert_model = bert_module.load_model()
+                bert_pca = None
             models["bert"] = bert_model
-        else:
-            bert_model = models["bert"]
-        create_table(split, extract_keywords_bert(df_news, bert_model), f"{split}_nlp_kw_bert")
+            models["bert_pca"] = bert_pca
+        elif "bert" not in models:
+            try:
+                models["bert"], models["bert_pca"] = bert_module.load_artifacts()
+            except Exception:
+                models["bert"] = bert_module.load_model()
+                models["bert_pca"] = None
+        create_table(split, extract_keywords_bert(df_news, models["bert"]), f"{split}_nlp_kw_bert")
     else:
         print(f"  [4/11] Keywords (BERT) skipped")
 
@@ -142,8 +200,21 @@ def process_split(split, models=None):
         topic_feats, lda, lda_vec = extract_topics(df_news)
         models["lda"] = lda
         models["lda_vec"] = lda_vec
-    else:
-        topic_feats, _, _ = extract_topics(df_news, models["lda"], models["lda_vec"], texts)
+    elif "lda" not in models:
+        lda_path = os.path.join(MODELS_DIR, "lda.pkl")
+        lda_vec_path = os.path.join(MODELS_DIR, "lda_vec.pkl")
+        if os.path.exists(lda_path) and os.path.exists(lda_vec_path):
+            with open(lda_path, "rb") as f:
+                models["lda"] = pickle.load(f)
+            with open(lda_vec_path, "rb") as f:
+                models["lda_vec"] = pickle.load(f)
+        else:
+            topic_feats, lda, lda_vec = extract_topics(df_news)
+            models["lda"] = lda
+            models["lda_vec"] = lda_vec
+            create_table(split, topic_feats, f"{split}_nlp_topics")
+            return models
+    topic_feats, _, _ = extract_topics(df_news, models["lda"], models["lda_vec"], texts)
     create_table(split, topic_feats, f"{split}_nlp_topics")
 
     # 6. Named entities
@@ -160,9 +231,19 @@ def process_split(split, models=None):
         tfidf, kmeans = train_tfidf_kmeans(all_texts)
         models["tfidf"] = tfidf
         models["kmeans"] = kmeans
-    else:
-        tfidf, kmeans = models["tfidf"], models["kmeans"]
-    create_table(split, extract_tfidf_clusters(df_news, tfidf, kmeans), f"{split}_nlp_tfidf")
+    elif "tfidf" not in models:
+        tfidf_path = os.path.join(MODELS_DIR, "tfidf.pkl")
+        kmeans_path = os.path.join(MODELS_DIR, "tfidf_kmeans.pkl")
+        if os.path.exists(tfidf_path) and os.path.exists(kmeans_path):
+            with open(tfidf_path, "rb") as f:
+                models["tfidf"] = pickle.load(f)
+            with open(kmeans_path, "rb") as f:
+                models["kmeans"] = pickle.load(f)
+        else:
+            tfidf, kmeans = train_tfidf_kmeans(all_texts)
+            models["tfidf"] = tfidf
+            models["kmeans"] = kmeans
+    create_table(split, extract_tfidf_clusters(df_news, models["tfidf"], models["kmeans"]), f"{split}_nlp_tfidf")
 
     # 9. BERT embeddings
     if bert_module.HAS_SENTENCE_TRANSFORMERS:
@@ -171,6 +252,13 @@ def process_split(split, models=None):
             bert_feats, bert_model2, bert_pca2 = extract_bert(df_news)
             models["bert"] = bert_model2
             models["bert_pca"] = bert_pca2
+        elif "bert" not in models:
+            try:
+                models["bert"], models["bert_pca"] = bert_module.load_artifacts()
+            except Exception:
+                models["bert"] = bert_module.load_model()
+                models["bert_pca"] = None
+            bert_feats, _, _ = extract_bert(df_news, models["bert"], models.get("bert_pca"), texts)
         else:
             bert_feats, _, _ = extract_bert(df_news, models["bert"], models.get("bert_pca"), texts)
         create_table(split, bert_feats, f"{split}_nlp_bert")
@@ -185,6 +273,10 @@ def process_split(split, models=None):
     print(f"  [11/11] Word vector similarity...")
     create_table(split, extract_word_vector_similarity(df_news, w2v_model), f"{split}_nlp_wv_sim")
 
+    # Save all NLP models after train split
+    if split == "train":
+        save_nlp_models(models)
+
     return models
 
 
@@ -195,7 +287,11 @@ def main():
     print(f"  BERT: {bert_module.HAS_SENTENCE_TRANSFORMERS}")
     print("=" * 50)
 
-    models = None
+    # Load existing models from disk if available
+    models = load_nlp_models()
+    if models:
+        print(f"  Loaded {len(models)} models from disk: {list(models.keys())}")
+
     for split in SPLITS:
         models = process_split(split, models)
 
