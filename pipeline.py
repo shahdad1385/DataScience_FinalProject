@@ -25,6 +25,7 @@ Evaluation flags:
 import sys
 import os
 
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from scripts.pipeline.run import run_pipeline
