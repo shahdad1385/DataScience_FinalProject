@@ -41,7 +41,7 @@ def finetune_all(trials=50, model_filter=None, verbose=False, skip_nlp=False):
     try:
         # Load data once
         X_train, y_reg_train, y_cls_train, feature_names, _ = prepare_data("train")
-        X_val, y_reg_val, y_cls_val, _, _ = prepare_data("val")
+        X_val, y_reg_val, y_cls_val, _, _ = prepare_data("val", feature_cols=feature_names)
 
         if X_train is None:
             print("ERROR: No training data.")
@@ -302,9 +302,10 @@ def _objective_clustering(trial):
 def _objective_ts(trial, model_name, X_tr, y_reg_tr, y_cls_tr,
                   X_v, y_reg_v, y_cls_v, input_size, n_tickers):
     """Optuna objective for time series models."""
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
     from ..timeseries import lstm, gru, transformer, bilstm, tcn
     from ..timeseries.train import train_model, get_device, validate
-    from ..timeseries.data import create_dataloaders
 
     lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
     batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
@@ -332,12 +333,10 @@ def _objective_ts(trial, model_name, X_tr, y_reg_tr, y_cls_tr,
     )
 
     device = get_device()
-    train_loader, val_loader, _ = create_dataloaders(
-        X_tr, y_reg_tr, y_cls_tr,
-        X_v, y_reg_v, y_cls_v,
-        X_v, y_reg_v, y_cls_v,
-        seq_len=SEQ_LEN, batch_size=batch_size,
-    )
+    ds_train = TensorDataset(torch.FloatTensor(X_tr), torch.FloatTensor(y_reg_tr), torch.FloatTensor(y_cls_tr))
+    ds_val = TensorDataset(torch.FloatTensor(X_v), torch.FloatTensor(y_reg_v), torch.FloatTensor(y_cls_v))
+    train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=0)
 
     model, _ = train_model(
         model, train_loader, val_loader,
