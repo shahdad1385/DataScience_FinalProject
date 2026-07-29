@@ -324,9 +324,9 @@ def run_preprocessing():
     print("PREPROCESSING — ALL TABLES (70/15/15 split)")
     print("=" * 50)
 
-    print("\nStep 1: Compute cutoff dates from stock_prices...")
-    stock_df = pd.read_sql("SELECT date FROM stock_prices", engine, parse_dates=["date"])
-    cutoff1, cutoff2 = compute_cutoff_dates(stock_df)
+    print("\nStep 1: Compute cutoff dates from news articles...")
+    news_df = pd.read_sql("SELECT date FROM news ORDER BY date", engine, parse_dates=["date"])
+    cutoff1, cutoff2 = compute_cutoff_dates(news_df)
     print(f"  Cutoff 1 (train/val): {cutoff1.date()}")
     print(f"  Cutoff 2 (val/test): {cutoff2.date()}")
     print(f"  (All tables will use these same cutoffs)")
