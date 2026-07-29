@@ -25,9 +25,10 @@ def get_device():
 def combined_loss(reg_pred, cls_pred, reg_target, cls_target, reg_weight=0.5, cls_weight=0.5):
     """
     Combined loss: MSE for OHLC regression + BCE for direction classification.
+    cls_pred should be raw logits (no sigmoid) — BCEWithLogitsLoss handles it.
     """
     reg_loss = nn.MSELoss()(reg_pred, reg_target)
-    cls_loss = nn.BCELoss()(cls_pred, cls_target)
+    cls_loss = nn.BCEWithLogitsLoss()(cls_pred, cls_target)
     return reg_weight * reg_loss + cls_weight * cls_loss, reg_loss.item(), cls_loss.item()
 
 
@@ -59,7 +60,7 @@ def train_one_epoch(model, loader, optimizer, device, use_amp=True):
 
 
 def validate(model, loader, device):
-    """Validate model. Returns average loss and predictions."""
+    """Validate model. Returns average loss and predictions (cls predictions are sigmoid-applied)."""
     model.eval()
     total_loss = 0
     n_batches = 0
@@ -72,14 +73,14 @@ def validate(model, loader, device):
             y_reg = y_reg.to(device)
             y_cls = y_cls.to(device)
 
-            reg_pred, cls_pred = model(x)
-            loss, _, _ = combined_loss(reg_pred, cls_pred, y_reg, y_cls)
+            reg_pred, cls_logits = model(x)
+            loss, _, _ = combined_loss(reg_pred, cls_logits, y_reg, y_cls)
 
             total_loss += loss.item()
             n_batches += 1
 
             all_reg_pred.append(reg_pred.cpu().numpy())
-            all_cls_pred.append(cls_pred.cpu().numpy())
+            all_cls_pred.append(torch.sigmoid(cls_logits).cpu().numpy())
             all_reg_true.append(y_reg.cpu().numpy())
             all_cls_true.append(y_cls.cpu().numpy())
 
@@ -180,7 +181,8 @@ def load_model(model_class, name, device="cpu"):
 
 
 def predict(model, loader, device=None):
-    """Run inference on a DataLoader. Returns (reg_pred, cls_pred)."""
+    """Run inference on a DataLoader. Returns (reg_pred, cls_prob)."""
+    import torch
     if device is None:
         device = get_device()
     model = model.to(device)
@@ -190,8 +192,8 @@ def predict(model, loader, device=None):
     with torch.no_grad():
         for x, _, _ in loader:
             x = x.to(device)
-            reg, cls = model(x)
+            reg, cls_logits = model(x)
             all_reg.append(reg.cpu().numpy())
-            all_cls.append(cls.cpu().numpy())
+            all_cls.append(torch.sigmoid(cls_logits).cpu().numpy())
 
     return np.concatenate(all_reg), np.concatenate(all_cls)

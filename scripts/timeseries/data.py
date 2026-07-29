@@ -12,25 +12,24 @@ class SequenceDataset(Dataset):
     """
     PyTorch Dataset for time series sequences.
     Creates sliding windows of (input_seq, target_reg, target_cls).
+    If X is already 3D (pre-sequenced), skips windowing.
     """
 
     def __init__(self, X, y_reg, y_cls, seq_len=30):
-        """
-        Args:
-            X: feature array of shape (n_samples, n_features)
-            y_reg: regression targets of shape (n_samples, n_tickers * 4) — OHLC
-            y_cls: classification targets of shape (n_samples, n_tickers) — direction
-            seq_len: number of days in each input sequence
-        """
         self.X = torch.FloatTensor(X)
         self.y_reg = torch.FloatTensor(y_reg)
         self.y_cls = torch.FloatTensor(y_cls)
         self.seq_len = seq_len
+        self.pre_sequenced = (self.X.ndim == 3)
 
     def __len__(self):
+        if self.pre_sequenced:
+            return len(self.X)
         return max(0, len(self.X) - self.seq_len)
 
     def __getitem__(self, idx):
+        if self.pre_sequenced:
+            return self.X[idx], self.y_reg[idx], self.y_cls[idx]
         x = self.X[idx:idx + self.seq_len]
         y_reg = self.y_reg[idx + self.seq_len]
         y_cls = self.y_cls[idx + self.seq_len]

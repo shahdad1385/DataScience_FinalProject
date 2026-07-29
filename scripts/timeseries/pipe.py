@@ -9,6 +9,7 @@ This module is called by the pipeline after NLP and clustering features are read
 
 import torch
 import numpy as np
+from torch.utils.data import DataLoader, TensorDataset
 
 from . import lstm
 from . import gru
@@ -22,6 +23,15 @@ from .train import (
 from .data import create_dataloaders
 
 
+def _make_loader(X, y_reg, y_cls, batch_size, shuffle):
+    """Create DataLoader. Handles both 2D (raw) and 3D (pre-sequenced) input."""
+    X_t = torch.FloatTensor(X)
+    y_reg_t = torch.FloatTensor(y_reg)
+    y_cls_t = torch.FloatTensor(y_cls)
+    ds = TensorDataset(X_t, y_reg_t, y_cls_t)
+    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=0)
+
+
 def train_all(X_train, y_reg_train, y_cls_train,
               X_val, y_reg_val, y_cls_val,
               seq_len=30, batch_size=64, lr=1e-3, epochs=100,
@@ -33,15 +43,10 @@ def train_all(X_train, y_reg_train, y_cls_train,
         dict with {model_name: (model, history, val_results)}
     """
     device = get_device()
-    input_size = X_train.shape[1]
+    input_size = X_train.shape[2] if X_train.ndim == 3 else X_train.shape[1]
 
-    # Create dataloaders
-    train_loader, val_loader, _ = create_dataloaders(
-        X_train, y_reg_train, y_cls_train,
-        X_val, y_reg_val, y_cls_val,
-        X_val, y_reg_val, y_cls_val,
-        seq_len=seq_len, batch_size=batch_size,
-    )
+    train_loader = _make_loader(X_train, y_reg_train, y_cls_train, batch_size, shuffle=True)
+    val_loader = _make_loader(X_val, y_reg_val, y_cls_val, batch_size, shuffle=False)
 
     results = {}
 
@@ -106,7 +111,7 @@ def train_single(model_name, X_train, y_reg_train, y_cls_train,
         dropout: dropout rate
     """
     device = get_device()
-    input_size = X_train.shape[1]
+    input_size = X_train.shape[2] if X_train.ndim == 3 else X_train.shape[1]
 
     model_modules = {
         "lstm": lstm, "gru": gru, "transformer": transformer,
@@ -121,17 +126,15 @@ def train_single(model_name, X_train, y_reg_train, y_cls_train,
     if model_name in ("transformer", "tcn"):
         extra_kwargs["nhead"] = 4
 
+    # TCN uses n_layers; everything else uses num_layers
+    layer_kw = "n_layers" if model_name == "tcn" else "num_layers"
     model = mod.create_model(
-        input_size, hidden_size=hidden_size, n_layers=n_layers,
+        input_size, hidden_size=hidden_size, **{layer_kw: n_layers},
         dropout=dropout, n_tickers=n_tickers, **extra_kwargs,
     )
 
-    train_loader, val_loader, _ = create_dataloaders(
-        X_train, y_reg_train, y_cls_train,
-        X_val, y_reg_val, y_cls_val,
-        X_val, y_reg_val, y_cls_val,
-        seq_len=seq_len, batch_size=batch_size,
-    )
+    train_loader = _make_loader(X_train, y_reg_train, y_cls_train, batch_size, shuffle=True)
+    val_loader = _make_loader(X_val, y_reg_val, y_cls_val, batch_size, shuffle=False)
 
     if verbose:
         print(f"\n{'='*40}")

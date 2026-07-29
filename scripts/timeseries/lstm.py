@@ -44,7 +44,7 @@ class StockLSTM(nn.Module):
         shared = self.relu(self.shared_fc(last))
         shared = self.dropout(shared)
         reg = self.reg_head(shared)
-        cls = torch.sigmoid(self.cls_head(shared))
+        cls = self.cls_head(shared)
         return reg, cls
 
 
