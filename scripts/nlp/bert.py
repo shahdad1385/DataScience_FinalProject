@@ -26,7 +26,7 @@ DEFAULT_BATCH_SIZE = 64
 def load_model(model_name=DEFAULT_MODEL):
     if not HAS_SENTENCE_TRANSFORMERS:
         raise ImportError("sentence-transformers not installed")
-    return SentenceTransformer(model_name)
+    return SentenceTransformer(model_name, device="cpu")
 
 
 def encode(model, texts, batch_size=DEFAULT_BATCH_SIZE):
@@ -55,7 +55,7 @@ def save_artifacts(model, pca, name="bert"):
 
 
 def load_artifacts(name="bert"):
-    model = SentenceTransformer(os.path.join(MODELS_DIR, f"{name}_model"))
+    model = SentenceTransformer(os.path.join(MODELS_DIR, f"{name}_model"), device="cpu")
     with open(os.path.join(MODELS_DIR, f"{name}_pca.pkl"), "rb") as f:
         pca = pickle.load(f)
     return model, pca
