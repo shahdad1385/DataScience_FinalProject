@@ -92,7 +92,14 @@ def run_prediction(results=None):
     print("STEP 4: PREDICTION")
     print("=" * 60)
     models = load_models()
-    predictions, df_test = predict_all(models)
+    if not models:
+        print("  No models found, skipping prediction")
+        return
+    result = predict_all(models)
+    if result is None:
+        print("  No prediction data available")
+        return
+    predictions, df_test = result
     if predictions:
         save_predictions_to_db(predictions, df_test)
 
