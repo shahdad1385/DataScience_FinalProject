@@ -73,8 +73,8 @@ def train_all_models(verbose=True, model_filter=None, epochs=100, lr=1e-3,
         # === 1. Load and prepare data ===
         print("\n[1/6] Loading data...")
         X_train, y_reg_train, y_cls_train, feature_names, df_train = prepare_data("train")
-        X_val, y_reg_val, y_cls_val, _, df_val = prepare_data("val")
-        X_test, y_reg_test, y_cls_test, _, df_test = prepare_data("test")
+        X_val, y_reg_val, y_cls_val, _, df_val = prepare_data("val", feature_cols=feature_names)
+        X_test, y_reg_test, y_cls_test, _, df_test = prepare_data("test", feature_cols=feature_names)
 
         if X_train is None:
             print("ERROR: No training data.")
@@ -319,8 +319,8 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
 
     # Load test data
     X_train, y_reg_train, y_cls_train, feature_names, _ = prepare_data("train")
-    X_val, y_reg_val, y_cls_val, _, _ = prepare_data("val")
-    X_test, y_reg_test, y_cls_test, _, df_test = prepare_data("test")
+    X_val, y_reg_val, y_cls_val, _, _ = prepare_data("val", feature_cols=feature_names)
+    X_test, y_reg_test, y_cls_test, _, df_test = prepare_data("test", feature_cols=feature_names)
 
     if X_test is None:
         print("ERROR: No test data.")
@@ -369,7 +369,6 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
 
                 from ..timeseries import lstm, gru, transformer, bilstm, tcn
                 from ..timeseries.train import load_model, validate, get_device
-                from ..timeseries.data import create_dataloaders
 
                 model_modules = {
                     "lstm": lstm, "gru": gru, "transformer": transformer,
@@ -380,12 +379,10 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 model = load_model(mod.create_model, f"timeseries_{model_name}", n_tickers=n_tickers)
 
                 device = get_device()
-                _, _, test_loader = create_dataloaders(
-                    X_tr_seq, y_reg_tr, y_cls_tr,
-                    X_v_seq, y_reg_v, y_cls_v,
-                    X_te_seq, y_reg_te, y_cls_te,
-                    seq_len=SEQ_LEN, batch_size=64,
-                )
+                import torch
+                from torch.utils.data import DataLoader, TensorDataset
+                ds_test = TensorDataset(torch.FloatTensor(X_te_seq), torch.FloatTensor(y_reg_te), torch.FloatTensor(y_cls_te))
+                test_loader = DataLoader(ds_test, batch_size=64, shuffle=False, num_workers=0)
 
                 val_loss, (reg_pred, cls_pred, reg_true, cls_true) = validate(model, test_loader, device)
 
