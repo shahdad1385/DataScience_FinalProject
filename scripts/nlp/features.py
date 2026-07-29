@@ -110,11 +110,12 @@ def extract_text_stats(df):
 # 3. KEYWORD EXTRACTION (dynamic — finds keywords from data)
 # =============================================================================
 
-def extract_keywords_w2v(df, w2v_model, top_n=5):
+def extract_keywords_w2v(df, w2v_model, top_n=5, max_keywords=500):
     """
     Extract keywords from each article using Word2Vec.
     Compares each word's vector to the document's average vector.
     Returns top_n keywords per article, then counts them per (ticker, date).
+    Keeps only the top max_keywords most frequent keywords as columns.
     """
     texts = _get_texts(df)
     all_keywords = []
@@ -122,7 +123,6 @@ def extract_keywords_w2v(df, w2v_model, top_n=5):
         kws = w2v_module.extract_keywords(w2v_model, text, top_n=top_n)
         all_keywords.append(kws)
 
-    # Count keyword occurrences per article
     records = []
     for i, kws in enumerate(all_keywords):
         row = {"date": df.iloc[i]["date"], "ticker": df.iloc[i]["ticker"]}
@@ -134,16 +134,22 @@ def extract_keywords_w2v(df, w2v_model, top_n=5):
     result = pd.DataFrame(records)
     kw_cols = [c for c in result.columns if c.startswith("kw_")]
     if kw_cols:
-        return _groupby(result, {col: "sum" for col in kw_cols})
+        if len(kw_cols) > max_keywords:
+            freq = result[kw_cols].sum().sort_values(ascending=False)
+            keep = list(freq.head(max_keywords).index)
+            drop = [c for c in kw_cols if c not in keep]
+            result = result.drop(columns=drop)
+        return _groupby(result, {col: "sum" for col in result.columns if col.startswith("kw_")})
     else:
         return df[["ticker", "date"]].drop_duplicates().reset_index(drop=True)
 
 
-def extract_keywords_bert(df, bert_model, top_n=5):
+def extract_keywords_bert(df, bert_model, top_n=5, max_keywords=500):
     """
     Extract keywords from each article using BERT.
     Compares each word's BERT embedding to the document embedding.
     Returns top_n keywords per article, then counts them per (ticker, date).
+    Keeps only the top max_keywords most frequent keywords as columns.
     """
     texts = _get_texts(df)
     all_keywords = []
@@ -162,7 +168,12 @@ def extract_keywords_bert(df, bert_model, top_n=5):
     result = pd.DataFrame(records)
     kw_cols = [c for c in result.columns if c.startswith("kw_")]
     if kw_cols:
-        return _groupby(result, {col: "sum" for col in kw_cols})
+        if len(kw_cols) > max_keywords:
+            freq = result[kw_cols].sum().sort_values(ascending=False)
+            keep = list(freq.head(max_keywords).index)
+            drop = [c for c in kw_cols if c not in keep]
+            result = result.drop(columns=drop)
+        return _groupby(result, {col: "sum" for col in result.columns if col.startswith("kw_")})
     else:
         return df[["ticker", "date"]].drop_duplicates().reset_index(drop=True)
 
