@@ -82,8 +82,9 @@ def predict_all(models):
     from ..tabular.ridge import predict as ridge_pred
     from ..tabular import logistic
 
-    # Load test data
-    X_test, y_reg_test, y_cls_test, feature_names, df_test = prepare_data("test")
+    # Load test data (align to training features)
+    _, _, _, feature_names, _ = prepare_data("train")
+    X_test, y_reg_test, y_cls_test, _, df_test = prepare_data("test", feature_cols=feature_names)
     if X_test is None:
         return None
 
