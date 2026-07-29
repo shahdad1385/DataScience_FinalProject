@@ -107,7 +107,7 @@ def merge_all_features(features, split):
     stock = stock[stock["ticker"].isin(TICKERS)].copy()
     stock["date"] = pd.to_datetime(stock["date"])
 
-    # Drop non-numeric columns
+    # Drop non-numeric columns from stock
     drop_cols = [c for c in stock.columns if c in ["id", "company", "day_name", "month_name"]]
     stock = stock.drop(columns=drop_cols, errors="ignore")
 
@@ -125,8 +125,10 @@ def merge_all_features(features, split):
         if "ticker" in df.columns:
             df = df[df["ticker"].isin(TICKERS) | df["ticker"].isna()]
 
-        # Drop id column
+        # Drop id column and non-numeric columns
         df = df.drop(columns=["id"], errors="ignore")
+        non_numeric = [c for c in df.columns if c not in ["ticker", "date"] and df[c].dtype not in ["float64", "float32", "int64", "int32", "bool"]]
+        df = df.drop(columns=non_numeric, errors="ignore")
 
         # Merge on (ticker, date) if ticker exists, else on date only
         if "ticker" in df.columns and df["ticker"].notna().any():
@@ -168,11 +170,18 @@ def add_targets(df):
             ticker_df["close"].shift(-1) > ticker_df["close"]
         ).astype(int).values
 
-    # Drop rows with NaN targets (last day per ticker)
-    target_cols = [c for c in df.columns if c.startswith("NVDA_target_") or
-                   c.startswith("GOOGL_target_") or c.startswith("AVGO_target_") or
-                   c.startswith("AMD_target_") or c.startswith("TSM_target_")]
-    df = df.dropna(subset=target_cols)
+    # Drop rows where this ticker's own targets are NaN (last day per ticker)
+    own_target_cols = []
+    for ticker in TICKERS:
+        for suffix in ["target_open", "target_high", "target_low", "target_close", "target_direction"]:
+            own_target_cols.append(f"{ticker}_{suffix}")
+
+    def _row_has_own_nan(row):
+        t = row["ticker"]
+        return any(pd.isna(row.get(f"{t}_{s}")) for s in ["target_open", "target_high", "target_low", "target_close", "target_direction"])
+
+    mask = df.apply(_row_has_own_nan, axis=1)
+    df = df[~mask].reset_index(drop=True)
 
     return df
 
@@ -187,10 +196,11 @@ def create_sequences(X, y_reg, y_cls, seq_len=SEQ_LEN):
     return np.array(X_seq), np.array(y_reg_seq), np.array(y_cls_seq)
 
 
-def prepare_data(split="train"):
+def prepare_data(split="train", feature_cols=None):
     """
     Full data preparation pipeline.
-    Returns: X_seq, y_reg, y_cls, feature_names, df_with_targets
+    If feature_cols is provided (for val/test), align to those columns.
+    Returns: X, y_reg, y_cls, feature_cols, df_with_targets
     """
     print(f"\n  Loading {split} features...")
     features = load_split_features(split)
@@ -213,25 +223,36 @@ def prepare_data(split="train"):
         return None, None, None, None, None
 
     # Separate features and targets
-    feature_cols = [c for c in df.columns if not c.endswith("_target_open") and
-                    not c.endswith("_target_high") and not c.endswith("_target_low") and
-                    not c.endswith("_target_close") and not c.endswith("_target_direction") and
-                    c not in ["id", "date", "ticker", "company", "day_name", "month_name"]]
+    exclude_cols = {"id", "date", "ticker", "company", "day_name", "month_name"}
+    target_prefixes = ("_target_",)
+    all_feature_cols = [c for c in df.columns if c not in exclude_cols
+                    and not any(p in c for p in target_prefixes)
+                    and df[c].dtype in ["float64", "float32", "int64", "int32"]]
 
     # Get one ticker's target columns
     reg_target_cols = [f"{t}_target_{c}" for t in TICKERS for c in ["open", "high", "low", "close"]]
     cls_target_cols = [f"{t}_target_direction" for t in TICKERS]
 
+    # Align to training feature columns if provided
+    if feature_cols is not None:
+        # Add missing columns as 0, drop extra columns
+        for c in feature_cols:
+            if c not in df.columns:
+                df[c] = 0.0
+        final_cols = feature_cols
+    else:
+        final_cols = all_feature_cols
+
     # Fill NaN features with 0
-    X = df[feature_cols].fillna(0).values.astype(np.float32)
+    X = df[final_cols].fillna(0).values.astype(np.float32)
     y_reg = df[reg_target_cols].fillna(0).values.astype(np.float32)
     y_cls = df[cls_target_cols].fillna(0).values.astype(np.float32)
 
-    print(f"  Features: {len(feature_cols)} cols")
+    print(f"  Features: {len(final_cols)} cols")
     print(f"  Regression targets: {y_reg.shape}")
     print(f"  Classification targets: {y_cls.shape}")
 
-    return X, y_reg, y_cls, feature_cols, df
+    return X, y_reg, y_cls, final_cols, df
 
 
 def prepare_sequences(X_train, y_reg_train, y_cls_train,
