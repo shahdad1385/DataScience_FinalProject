@@ -7,6 +7,7 @@ Saves feature tables to DB: one table per feature type per split.
 """
 
 import os
+import re
 import sys
 import pickle
 import warnings
@@ -18,14 +19,49 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.db import get_engine
 
 from . import word2vec as w2v_module
-from . import bert as bert_module
+
+
+class _LazyBert:
+    """Defer importing bert.py (and sentence_transformers -> transformers ->
+    tensorflow) until an attribute is actually touched.
+
+    Importing it at module scope meant a broken sentence_transformers install
+    made this orchestrator unimportable, so Word2Vec, TF-IDF, LDA and sentiment
+    could not run either. HAS_SENTENCE_TRANSFORMERS reports False instead of
+    raising, so the pipeline degrades to non-BERT features.
+    """
+
+    _mod = None
+    _failed = False
+
+    def _load(self):
+        if self._mod is None and not self._failed:
+            try:
+                from . import bert as bert_module
+                self._mod = bert_module
+            except Exception as e:  # noqa: BLE001 - any import-chain failure
+                print(f"  WARNING: BERT unavailable ({type(e).__name__}: {e}).")
+                print("           Continuing without BERT-based features.")
+                self._failed = True
+        return self._mod
+
+    def __getattr__(self, name):
+        mod = self._load()
+        if mod is None:
+            if name == "HAS_SENTENCE_TRANSFORMERS":
+                return False
+            raise ImportError(f"BERT support unavailable; cannot access {name!r}")
+        return getattr(mod, name)
+
+
+bert_module = _LazyBert()
 from .features import (
     extract_sentiment, extract_text_stats,
     extract_keywords_w2v, extract_keywords_bert,
     extract_topics, extract_entities,
     extract_word2vec, extract_tfidf_clusters, train_tfidf_kmeans,
     extract_bert, extract_volume, extract_word_vector_similarity,
-    _get_texts,
+    _get_texts, INDUSTRY_TICKER,
 )
 
 warnings.filterwarnings("ignore")
@@ -88,12 +124,20 @@ def load_nlp_models():
 
 
 def load_news(split):
+    """Load news for a split, mapping NULL/'' ticker to the industry sentinel.
+
+    Industry-wide articles (no specific ticker) are a real signal. Leaving the
+    ticker as NULL made every groupby(["ticker", "date"]) silently drop them,
+    which is why splits made up entirely of industry news produced zero NLP
+    rows. COALESCE makes those rows first-class and groupable.
+    """
     tf = ", ".join(f"'{t}'" for t in TICKERS)
     return pd.read_sql(f"""
-        SELECT id, date, headline, summary, llm_summary, ticker, source
+        SELECT id, date, headline, summary, llm_summary, source,
+               COALESCE(NULLIF(TRIM(ticker), ''), '{INDUSTRY_TICKER}') AS ticker
         FROM {split}_news
         WHERE headline IS NOT NULL AND LENGTH(headline) > 10
-          AND (ticker IN ({tf}) OR ticker IS NULL OR ticker = '')
+          AND (ticker IN ({tf}) OR ticker IS NULL OR TRIM(ticker) = '')
         ORDER BY date
     """, engine, parse_dates=["date"])
 
@@ -101,10 +145,11 @@ def load_news(split):
 def load_social(split):
     tf = ", ".join(f"'{t}'" for t in TICKERS)
     return pd.read_sql(f"""
-        SELECT id, date, headline, ticker, sentiment_score
+        SELECT id, date, headline, sentiment_score,
+               COALESCE(NULLIF(TRIM(ticker), ''), '{INDUSTRY_TICKER}') AS ticker
         FROM {split}_social_sentiment
         WHERE headline IS NOT NULL AND LENGTH(headline) > 10
-          AND (ticker IN ({tf}) OR ticker IS NULL OR ticker = '')
+          AND (ticker IN ({tf}) OR ticker IS NULL OR TRIM(ticker) = '')
         ORDER BY date
     """, engine, parse_dates=["date"])
 
@@ -126,7 +171,40 @@ def prepare_corpus(df_news, df_social):
     return texts
 
 
+def _sanitize_columns(df):
+    """Make column names safe and unique for SQL.
+
+    Guards against MultiIndex leftovers and any name containing characters that
+    would have to be quoted. Downstream code addresses columns by plain name, so
+    a column that only exists under a quoted exotic name is effectively lost.
+    """
+    seen = {}
+    new_cols = []
+    for col in df.columns:
+        if isinstance(col, tuple):
+            name = "_".join(str(p) for p in col if str(p) != "")
+        else:
+            name = str(col)
+        name = re.sub(r"[^0-9a-zA-Z_]+", "_", name).strip("_").lower() or "col"
+        if name[0].isdigit():
+            name = f"c_{name}"
+        if name in seen:
+            seen[name] += 1
+            name = f"{name}_{seen[name]}"
+        else:
+            seen[name] = 0
+        new_cols.append(name)
+    df = df.copy()
+    df.columns = new_cols
+    return df
+
+
 def create_table(split, df, name):
+    df = _sanitize_columns(df)
+    if "ticker" not in df.columns or "date" not in df.columns:
+        raise ValueError(
+            f"{name}: expected 'ticker' and 'date' columns, got {list(df.columns)[:8]}"
+        )
     with engine.connect() as conn:
         conn.execute(text(f"DROP TABLE IF EXISTS {name}"))
         cols = [f'"{c}" REAL' for c in df.columns if c not in ("ticker", "date")]
@@ -134,7 +212,10 @@ def create_table(split, df, name):
         conn.execute(text(sql))
         df.to_sql(name, engine, if_exists="append", index=False)
         conn.commit()
-    print(f"  -> {name}: {len(df):,} rows, {len(df.columns)} cols")
+    if df.empty:
+        print(f"  -> {name}: 0 rows, {len(df.columns)} cols  [WARNING: empty]")
+    else:
+        print(f"  -> {name}: {len(df):,} rows, {len(df.columns)} cols")
 
 
 def process_split(split, models=None):
