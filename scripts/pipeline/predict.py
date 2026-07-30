@@ -28,16 +28,23 @@ def load_models():
 
     models = {}
 
-    # Time series
+    # Time series.
+    #
+    # Loading goes through timeseries.train.load_model so the architecture is
+    # rebuilt from the kwargs stored in the checkpoint. Calling
+    # create_model(input_size, n_tickers=5) directly, as before, silently used
+    # the default hidden_size=128 even when the model was trained with 64, so
+    # load_state_dict failed with a size mismatch on every run.
     from ..timeseries import lstm, gru, transformer, bilstm, tcn
+    from ..timeseries.train import load_model as load_ts_model
     for name, mod in [("lstm", lstm), ("gru", gru), ("transformer", transformer),
                       ("bilstm", bilstm), ("tcn", tcn)]:
         path = os.path.join(models_dir, f"timeseries_{name}.pt")
         if os.path.exists(path):
-            ckpt = torch.load(path, map_location="cpu")
-            model = mod.create_model(ckpt["input_size"], n_tickers=5)
-            model.load_state_dict(ckpt["model_state_dict"])
-            models[f"ts_{name}"] = model
+            models[f"ts_{name}"] = load_ts_model(
+                mod.create_model, f"timeseries_{name}",
+                default_kwargs={"n_tickers": len(TICKERS)},
+            )
 
     # Tabular
     for name in ["xgboost", "random_forest", "lightgbm"]:
@@ -93,17 +100,27 @@ def predict_all(models):
     if X_test is None:
         return None
 
-    # Create sequences for time series
-    from .data_assembly import create_sequences
-    X_seq, y_reg_seq, y_cls_seq = create_sequences(X_test, y_reg_test, y_cls_test)
+    # Seed the sequence windows with the tail of the validation split so every
+    # test date is predicted, including the first 30. Each window still ends the
+    # day before its label, so no future information reaches the model.
+    from .data_assembly import (create_sequences_with_context, load_feature_scaler,
+                                apply_feature_scaler)
+    X_val, _, _, _, _ = prepare_data("val", feature_cols=feature_names)
+
+    # Same train-fitted scaler used during training, or predictions are garbage.
+    scaler = load_feature_scaler()
+    if scaler is not None:
+        X_test = apply_feature_scaler(X_test, scaler)
+        X_val = apply_feature_scaler(X_val, scaler)
+    X_seq, y_reg_seq, y_cls_seq, label_index = create_sequences_with_context(
+        X_test, y_reg_test, y_cls_test, context=X_val)
     X_flat = flatten_sequences(X_seq)
 
     if len(X_seq) == 0:
         print("  No test sequences available (test split shorter than SEQ_LEN)")
         return None
 
-    # Rows of df_test that each sequence label corresponds to
-    label_index = np.arange(SEQ_LEN, SEQ_LEN + len(X_seq))
+    # Rows of df_test that each sequence label corresponds to.
     df_labels = df_test.iloc[label_index].reset_index(drop=True)
 
     results = {}

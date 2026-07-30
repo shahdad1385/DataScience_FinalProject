@@ -15,6 +15,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.db import get_engine
+from scripts.preprocessing.preprocess import inverse_transform_column
 
 TICKERS = ["NVDA", "GOOGL", "AVGO", "AMD", "TSM"]
 SEQ_LEN = 30
@@ -150,39 +151,80 @@ def merge_all_features(features, split):
     return stock
 
 
+OHLC_COLS = ["open", "high", "low", "close"]
+TARGET_SUFFIXES = [f"target_ret_{c}" for c in OHLC_COLS] + ["target_direction"]
+# Non-feature helper column: today's real close, needed to turn a predicted
+# return back into a dollar price.
+REF_CLOSE_SUFFIX = "refclose"
+
+
 def add_targets(df):
-    """
-    Add target variables for each ticker.
-    Regression: next-day OHLC for each ticker.
-    Classification: next-day direction (up=1, down=0) for each ticker.
+    """Add next-day RETURN targets for each ticker.
+
+    Why returns rather than absolute price levels: the price columns are scaled
+    with a RobustScaler fitted on train only, and these are non-stationary
+    series in a strong uptrend. Test-set scaled closes reach 5-7 while train
+    never exceeds ~1.6 (NVDA's test max is ~66x its train max), so a model asked
+    to output price levels must extrapolate far outside anything it saw while
+    training. That is what produced val losses stuck near 0.7 with train at 0.09,
+    and R2 around -9 on test.
+
+    Returns are stationary and comparable across both splits and tickers, so the
+    same model output range is valid everywhere. Dollar prices are recovered
+    downstream as ref_close * (1 + predicted_return).
+
+    Regression targets: (next_day_{O,H,L,C} / today_close) - 1
+    Classification target: 1 if next close > today close else 0
     """
     df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
 
+    # Returns must be computed on real prices. The scaled columns are an affine
+    # transform of the originals, and a ratio of affine-transformed values is not
+    # the ratio of the underlying prices, so invert the scaling first.
+    real = {}
+    for col in OHLC_COLS:
+        if col in df.columns:
+            real[col] = inverse_transform_column("stock_prices", col, df[col].values)
+        else:
+            real[col] = np.full(len(df), np.nan)
+    real_df = pd.DataFrame(real, index=df.index)
+
     for ticker in TICKERS:
-        mask = df["ticker"] == ticker
-        ticker_df = df[mask].copy()
+        mask = (df["ticker"] == ticker).values
+        if not mask.any():
+            continue
+        today_close = pd.Series(real_df.loc[mask, "close"].values)
+        # Guard against non-positive prices before dividing.
+        denom = today_close.where(today_close > 0)
 
-        # Next day OHLC (shift by -1)
-        for col in ["open", "high", "low", "close"]:
-            df.loc[mask, f"{ticker}_target_{col}"] = ticker_df[col].shift(-1).values
+        for col in OHLC_COLS:
+            next_price = pd.Series(real_df.loc[mask, col].values).shift(-1)
+            df.loc[mask, f"{ticker}_target_ret_{col}"] = (next_price / denom - 1.0).values
 
-        # Direction: 1 if next close > today close, else 0
-        df.loc[mask, f"{ticker}_target_direction"] = (
-            ticker_df["close"].shift(-1) > ticker_df["close"]
-        ).astype(int).values
+        next_close = today_close.shift(-1)
+        direction = (next_close > today_close)
+        # Keep NaN where the next day is unknown so the row is dropped below,
+        # rather than silently becoming a "down" label.
+        direction = direction.where(next_close.notna() & denom.notna())
+        df.loc[mask, f"{ticker}_target_direction"] = direction.values
 
-    # Drop rows where this ticker's own targets are NaN (last day per ticker)
-    own_target_cols = []
-    for ticker in TICKERS:
-        for suffix in ["target_open", "target_high", "target_low", "target_close", "target_direction"]:
-            own_target_cols.append(f"{ticker}_{suffix}")
+        # Today's real close, used to reconstruct dollar prices from returns.
+        df.loc[mask, f"{ticker}_{REF_CLOSE_SUFFIX}"] = today_close.values
 
-    def _row_has_own_nan(row):
-        t = row["ticker"]
-        return any(pd.isna(row.get(f"{t}_{s}")) for s in ["target_open", "target_high", "target_low", "target_close", "target_direction"])
-
-    mask = df.apply(_row_has_own_nan, axis=1)
-    df = df[~mask].reset_index(drop=True)
+    # Drop rows whose own ticker's targets are unknown (last day per ticker).
+    own_cols = [f"{t}_{s}" for t in TICKERS for s in TARGET_SUFFIXES]
+    have = [c for c in own_cols if c in df.columns]
+    if have:
+        ticker_arr = df["ticker"].values
+        bad = np.zeros(len(df), dtype=bool)
+        for t in TICKERS:
+            m = (ticker_arr == t)
+            if not m.any():
+                continue
+            cols = [f"{t}_{s}" for s in TARGET_SUFFIXES if f"{t}_{s}" in df.columns]
+            if cols:
+                bad |= m & df[cols].isna().any(axis=1).values
+        df = df[~bad].reset_index(drop=True)
 
     return df
 

@@ -19,7 +19,10 @@ import mlflow
 
 from .data_assembly import TICKERS, SEQ_LEN
 
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
+# Must match every other module (scripts/models). This file previously applied
+# dirname three times instead of two, resolving to CAF/models, so evaluation
+# artifacts were written to a directory nothing else reads.
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 EVAL_RESULTS_DIR = os.path.join(MODELS_DIR, "eval_results")
 EVAL_PLOTS_DIR = os.path.join(MODELS_DIR, "eval_plots")
 CONFUSION_DIR = os.path.join(EVAL_RESULTS_DIR, "confusion")

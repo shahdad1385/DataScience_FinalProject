@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from .data_assembly import (
     prepare_data, prepare_sequences, flatten_sequences, TICKERS, SEQ_LEN,
+    fit_feature_scaler, apply_feature_scaler,
 )
 
 
@@ -46,6 +47,12 @@ def finetune_all(trials=50, model_filter=None, verbose=False, skip_nlp=False):
         if X_train is None:
             print("ERROR: No training data.")
             return None
+
+        # Tune on the same feature scale the models will be trained on,
+        # otherwise the chosen hyperparameters do not transfer to train mode.
+        scaler = fit_feature_scaler(X_train)
+        X_train = apply_feature_scaler(X_train, scaler)
+        X_val = apply_feature_scaler(X_val, scaler)
 
         (X_tr_seq, y_reg_tr, y_cls_tr,
          X_v_seq, y_reg_v, y_cls_v,
@@ -323,14 +330,29 @@ def _objective_ts(trial, model_name, X_tr, y_reg_tr, y_cls_tr,
     }
 
     mod = model_modules[model_name]
-    extra_kwargs = {}
-    if model_name in ("transformer", "tcn"):
-        extra_kwargs["nhead"] = trial.suggest_categorical("nhead", [2, 4, 8])
 
-    model = mod.create_model(
-        input_size, hidden_size=hidden_size, num_layers=num_layers,
-        dropout=dropout, n_tickers=n_tickers, **extra_kwargs,
-    )
+    # Each architecture names its width/depth differently. Passing
+    # hidden_size/num_layers to all of them raised TypeError for transformer
+    # (wants d_model) and tcn (wants n_channels/n_layers, and accepts no nhead),
+    # so --mode finetune could never tune those two models.
+    kwargs = {"dropout": dropout, "n_tickers": n_tickers}
+    if model_name == "transformer":
+        nhead = trial.suggest_categorical("nhead", [2, 4, 8])
+        # nn.MultiheadAttention requires d_model % nhead == 0; an invalid pair
+        # would abort the trial, so snap d_model up to the next valid multiple.
+        d_model = int(np.ceil(hidden_size / nhead) * nhead)
+        kwargs.update(d_model=d_model, nhead=nhead, num_layers=num_layers)
+    elif model_name == "tcn":
+        kwargs.update(
+            n_channels=hidden_size,
+            n_layers=num_layers,
+            kernel_size=trial.suggest_categorical("kernel_size", [2, 3, 5]),
+        )
+    else:  # lstm, gru, bilstm
+        kwargs.update(hidden_size=hidden_size, num_layers=num_layers)
+
+    from ..timeseries.pipe import _build
+    model = _build(mod, input_size, **kwargs)
 
     device = get_device()
     ds_train = TensorDataset(torch.FloatTensor(X_tr), torch.FloatTensor(y_reg_tr), torch.FloatTensor(y_cls_tr))

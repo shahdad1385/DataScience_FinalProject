@@ -80,6 +80,19 @@ def train_all_models(verbose=True, model_filter=None, epochs=200, lr=1e-3,
             print("ERROR: No training data.")
             return None
 
+        # Fit and apply a StandardScaler over the full joint feature matrix so
+        # the unscaled NLP and embedding columns (Word2Vec, BERT, TF-IDF, keyword
+        # counts) get normalized alongside the price/return/sentiment columns that
+        # preprocess.py already scaled. Logistic hung before because it saw features
+        # spanning 5+ orders of magnitude, and every other gradient/distance model
+        # (MLP, XGBoost margins, etc.) also benefits from uniform scale.
+        from .data_assembly import fit_feature_scaler, apply_feature_scaler
+        scaler = fit_feature_scaler(X_train)
+        X_train = apply_feature_scaler(X_train, scaler)
+        X_val = apply_feature_scaler(X_val, scaler)
+        X_test = apply_feature_scaler(X_test, scaler)
+        print("  Feature scaler fitted and applied to all splits")
+
         mlflow.log_param("n_samples_train", X_train.shape[0])
         mlflow.log_param("n_samples_val", X_val.shape[0])
         mlflow.log_param("n_samples_test", X_test.shape[0])
@@ -326,6 +339,17 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
         print("ERROR: No test data.")
         return None
 
+    # Reuse the scaler fitted during training. Evaluating unscaled features
+    # against models trained on scaled ones would silently report nonsense.
+    from .data_assembly import load_feature_scaler, apply_feature_scaler
+    scaler = load_feature_scaler()
+    if scaler is not None:
+        X_train = apply_feature_scaler(X_train, scaler)
+        X_val = apply_feature_scaler(X_val, scaler)
+        X_test = apply_feature_scaler(X_test, scaler)
+    else:
+        print("  WARNING: no saved feature scaler; evaluating on raw features.")
+
     (X_tr_seq, y_reg_tr, y_cls_tr,
      X_v_seq, y_reg_v, y_cls_v,
      X_te_seq, y_reg_te, y_cls_te) = prepare_sequences(
@@ -344,6 +368,9 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
     mlflow.set_experiment("CAF_Stock_Prediction")
     run = mlflow.start_run(run_name="evaluate")
     results = {}
+    # Collected per-model failures so evaluate mode can fail loudly at the end
+    # instead of exiting successfully with an empty results dict.
+    eval_failures = []
 
     try:
         mlflow.log_param("mode", "evaluate")
@@ -376,7 +403,13 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 }
 
                 mod = model_modules[model_name]
-                model = load_model(mod.create_model, f"timeseries_{model_name}", n_tickers=n_tickers)
+                # n_tickers goes through default_kwargs: load_model() takes no
+                # **kwargs, so passing it directly raised TypeError for every
+                # model and the error was swallowed by the except below.
+                model = load_model(
+                    mod.create_model, f"timeseries_{model_name}",
+                    default_kwargs={"n_tickers": n_tickers},
+                )
 
                 device = get_device()
                 import torch
@@ -407,7 +440,14 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 mlflow.log_metric(f"eval_ts_{model_name}_val_loss", val_loss)
 
             except Exception as e:
-                print(f"  Error evaluating {model_name}: {e}")
+                # Record the failure instead of only printing it. This handler
+                # previously hid TypeErrors from load_model and shape mismatches,
+                # letting `--mode evaluate` (and CI, which runs exactly that)
+                # exit 0 while evaluating nothing at all.
+                import traceback
+                print(f"  ERROR evaluating {model_name}: {type(e).__name__}: {e}")
+                traceback.print_exc()
+                eval_failures.append(f"ts_{model_name}: {type(e).__name__}: {e}")
 
         # Determine which tabular models to evaluate
         tab_models_to_evaluate = []
@@ -453,7 +493,12 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 else:
                     continue
 
-                reg_metrics = evaluate_regression(y_reg_test, pred_reg)
+                # Compare against the sequence-aligned targets. X_te_flat comes
+                # from X_te_seq, which drops the first SEQ_LEN rows, so it has
+                # 292 rows while y_reg_test still has 322. Using y_reg_test here
+                # made every evaluate_regression call raise a shape error that
+                # the enclosing handler then swallowed.
+                reg_metrics = evaluate_regression(y_reg_te, pred_reg)
 
                 # Load and evaluate classification
                 cls_pkl_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_cls.pkl")
@@ -468,12 +513,13 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                         pred_cls = cls_model.predict(X_te_flat)
                         prob_cls = cls_model.predict_proba(X_te_flat)
                     elif model_name == "logistic":
-                        pred_cls = np.zeros_like(y_cls_test, dtype=float)
-                        prob_cls = np.zeros_like(y_cls_test, dtype=float)
+                        # Shaped from y_cls_te (sequence-aligned), not y_cls_test,
+                        # so the per-ticker columns line up with X_te_flat rows.
+                        pred_cls = np.zeros_like(y_cls_te, dtype=float)
+                        prob_cls = np.zeros_like(y_cls_te, dtype=float)
                         for t in range(n_tickers):
                             pred_cls[:, t] = cls_model[t].predict(X_te_flat)
                             prob_cls[:, t] = cls_model[t].predict_proba(X_te_flat)[:, 1]
-                        prob_cls = prob_cls
                     else:
                         continue
                 elif os.path.exists(cls_mlp_path):
@@ -484,7 +530,7 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                     pred_cls = None
                     prob_cls = None
 
-                cls_metrics = evaluate_classification(y_cls_test, pred_cls, prob_cls) if pred_cls is not None else {}
+                cls_metrics = evaluate_classification(y_cls_te, pred_cls, prob_cls) if pred_cls is not None else {}
 
                 results[f"tab_{model_name}"] = {
                     "regression": reg_metrics,
@@ -501,7 +547,10 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                     mlflow.log_metric(f"eval_tab_{model_name}_f1", cls_metrics.get("f1", 0))
 
             except Exception as e:
-                print(f"  Error evaluating {model_name}: {e}")
+                import traceback
+                print(f"  ERROR evaluating {model_name}: {type(e).__name__}: {e}")
+                traceback.print_exc()
+                eval_failures.append(f"tabular_{model_name}: {type(e).__name__}: {e}")
 
         # Save evaluation results
         eval_path = os.path.join(MODELS_DIR, "evaluation_results.pkl")
@@ -533,8 +582,23 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 traceback.print_exc()
 
         print("\n" + "=" * 60)
-        print("EVALUATION COMPLETE")
-        print("=" * 60)
+        if eval_failures:
+            print("EVALUATION FINISHED WITH ERRORS")
+            print("=" * 60)
+            for msg in eval_failures:
+                print(f"  - {msg}")
+            mlflow.log_param("eval_failures", len(eval_failures))
+            if not results:
+                # Nothing evaluated at all. Raising is essential: CI runs
+                # `--mode evaluate`, so a silent empty result set made the
+                # pipeline look healthy while every model failed to load.
+                raise RuntimeError(
+                    "Evaluation produced no results; all models failed:\n  "
+                    + "\n  ".join(eval_failures)
+                )
+        else:
+            print("EVALUATION COMPLETE")
+            print("=" * 60)
 
         return results
     finally:
@@ -626,12 +690,25 @@ def save_results(ts_results, tab_reg_results, tab_cls_results, ensemble,
 
     os.makedirs(MODELS_DIR, exist_ok=True)
 
-    # Save ALL time series models
+    # Save ALL time series models.
+    #
+    # input_size and the constructor kwargs come from the config recorded when
+    # the model was built. The previous code used model.reg_head.in_features,
+    # which is the shared-layer width (128), not the per-timestep feature count
+    # (~1324), and saved no kwargs at all — so hidden_size/num_layers were lost.
+    # Every checkpoint written that way rebuilt at the wrong shape and failed to
+    # load, which is why --mode evaluate silently produced nothing.
     if ts_results:
+        from ..timeseries.pipe import get_build_config
         for name, res in ts_results.items():
             model = res["model"]
-            input_size = model.reg_head.in_features
-            save_ts(model, f"timeseries_{name}", input_size)
+            input_size, kwargs = get_build_config(model)
+            if input_size is None:
+                raise ValueError(
+                    f"timeseries_{name}: build config missing; cannot save a "
+                    "loadable checkpoint."
+                )
+            save_ts(model, f"timeseries_{name}", input_size, **kwargs)
 
     # Save tabular models
     if tab_reg_results:
