@@ -34,8 +34,8 @@ def _make_loader(X, y_reg, y_cls, batch_size, shuffle):
 
 def train_all(X_train, y_reg_train, y_cls_train,
               X_val, y_reg_val, y_cls_val,
-              seq_len=30, batch_size=64, lr=1e-3, epochs=100,
-              patience=10, n_tickers=5, tickers=None, verbose=True):
+              seq_len=30, batch_size=64, lr=1e-3, epochs=200,
+              patience=30, n_tickers=5, tickers=None, verbose=True):
     """
     Train all time series models and compare.
 
@@ -98,8 +98,8 @@ def _validate(model, loader, device):
 
 def train_single(model_name, X_train, y_reg_train, y_cls_train,
                  X_val, y_reg_val, y_cls_val,
-                 seq_len=30, n_tickers=5, lr=1e-3, epochs=100,
-                 patience=10, batch_size=64, hidden_size=64,
+                 seq_len=30, n_tickers=5, lr=1e-3, epochs=200,
+                 patience=30, batch_size=64, hidden_size=64,
                  n_layers=2, dropout=0.2, verbose=True):
     """
     Train a single time series model with custom hyperparameters.
@@ -122,16 +122,18 @@ def train_single(model_name, X_train, y_reg_train, y_cls_train,
         raise ValueError(f"Unknown model: {model_name}")
 
     mod = model_modules[model_name]
-    extra_kwargs = {}
-    if model_name in ("transformer", "tcn"):
+    extra_kwargs = {"dropout": dropout, "n_tickers": n_tickers}
+    if model_name == "transformer":
+        extra_kwargs["d_model"] = hidden_size
         extra_kwargs["nhead"] = 4
+    elif model_name == "tcn":
+        extra_kwargs["n_channels"] = hidden_size
+        extra_kwargs["n_layers"] = n_layers
+    else:
+        extra_kwargs["hidden_size"] = hidden_size
+        extra_kwargs["num_layers"] = n_layers
 
-    # TCN uses n_layers; everything else uses num_layers
-    layer_kw = "n_layers" if model_name == "tcn" else "num_layers"
-    model = mod.create_model(
-        input_size, hidden_size=hidden_size, **{layer_kw: n_layers},
-        dropout=dropout, n_tickers=n_tickers, **extra_kwargs,
-    )
+    model = mod.create_model(input_size, **extra_kwargs)
 
     train_loader = _make_loader(X_train, y_reg_train, y_cls_train, batch_size, shuffle=True)
     val_loader = _make_loader(X_val, y_reg_val, y_cls_val, batch_size, shuffle=False)
