@@ -226,21 +226,36 @@ def add_indicator_features():
     updates = pd.DataFrame(index=df.index)
     updates["id"] = df["id"]
 
-    updates["indicator_return"] = df.groupby("indicator")["close"].pct_change()
-    updates["indicator_log_return"] = df.groupby("indicator").apply(
-        lambda g: np.log(g["close"] / g["close"].shift(1)), include_groups=False
-    ).reset_index(level=0, drop=True)
+    # Every rolling/ewm window below must be scoped to a single indicator.
+    # Previously `.shift(1).rolling(7)` was called on the ungrouped frame, so a
+    # window spanning the boundary between two indicators mixed, for example,
+    # VIX values into an S&P 500 moving average. Regrouping before rolling keeps
+    # each series independent. The `.shift(1)` keeps the windows leakage-free.
+    grouped_close = df.groupby("indicator")["close"]
+
+    updates["indicator_return"] = grouped_close.pct_change()
+    updates["indicator_log_return"] = np.log(df["close"] / grouped_close.shift(1))
 
     for lag in [1, 5, 10]:
-        updates[f"indicator_lag_{lag}d"] = df.groupby("indicator")["close"].shift(lag)
+        updates[f"indicator_lag_{lag}d"] = grouped_close.shift(lag)
 
     shifted = updates.groupby(df["indicator"])["indicator_return"].shift(1)
-    updates["indicator_vol_7d"] = shifted.rolling(7).mean()
+    shifted_by_indicator = shifted.groupby(df["indicator"])
+    prev_close_by_indicator = grouped_close.shift(1).groupby(df["indicator"])
 
-    updates["indicator_ma_7"] = df.groupby("indicator")["close"].shift(1).rolling(7).mean()
-    updates["indicator_ma_30"] = df.groupby("indicator")["close"].shift(1).rolling(30).mean()
+    def _flatten(series):
+        # grouped rolling/ewm returns a (indicator, original_index) MultiIndex;
+        # drop the indicator level so it realigns with df.index on assignment.
+        return series.reset_index(level=0, drop=True)
+
+    # Volatility is a rolling standard deviation, matching volatility_7d in
+    # add_stock_features. The previous .rolling(7).mean() computed a mean return
+    # and stored it under a column named "vol", which is not a volatility.
+    updates["indicator_vol_7d"] = _flatten(shifted_by_indicator.rolling(7).std())
+    updates["indicator_ma_7"] = _flatten(prev_close_by_indicator.rolling(7).mean())
+    updates["indicator_ma_30"] = _flatten(prev_close_by_indicator.rolling(30).mean())
     updates["indicator_ma_ratio"] = df["close"] / (updates["indicator_ma_7"] + 1e-8)
-    updates["indicator_ewm_12"] = shifted.ewm(span=12).mean()
+    updates["indicator_ewm_12"] = _flatten(shifted_by_indicator.ewm(span=12).mean())
 
     updates = updates.where(pd.notnull(updates), None)
     batch_update("market_indicators", updates)
@@ -410,30 +425,32 @@ def add_economic_event_features():
         return
     df["date"] = pd.to_datetime(df["date"])
 
-    # Per-ticker event features
-    for ticker, group in df.groupby("ticker"):
+    # Per-ticker event features.
+    #
+    # These are assigned positionally via `.values`. The previous version built
+    # helper Series with `pd.Series(dates)`, which carries a fresh 0..n-1 index,
+    # then assigned it through `df.loc[idx, ...]`, where `idx` holds the original
+    # DataFrame labels. pandas aligns on index labels during assignment, so the
+    # two indexes almost never matched and ~91% of the values landed as NaN.
+    # That is why days_to_next_event / days_since_last_event were later dropped
+    # as ">50% null" instead of being usable features.
+    for ticker, group in df.groupby("ticker", dropna=False):
         g = group.sort_values("date")
         idx = g.index
+        dates = pd.Series(g["date"].values)
 
-        # Days to next event
-        dates = g["date"].values
-        next_dates = pd.Series(dates).shift(-1).values
-        df.loc[idx, "days_to_next_event"] = (pd.Series(next_dates) - pd.Series(dates)).dt.days
+        # Days to next / since last event for this ticker.
+        df.loc[idx, "days_to_next_event"] = (dates.shift(-1) - dates).dt.days.values
+        df.loc[idx, "days_since_last_event"] = (dates - dates.shift(1)).dt.days.values
 
-        # Days since last event
-        prev_dates = pd.Series(dates).shift(1).values
-        df.loc[idx, "days_since_last_event"] = (pd.Series(dates) - pd.Series(prev_dates)).dt.days
+        df.loc[idx, "is_earnings_week"] = (g["event_type"] == "earnings").astype(int).values
+        df.loc[idx, "is_dividend_week"] = (g["event_type"] == "dividend").astype(int).values
 
-        # Is earnings week
-        df.loc[idx, "is_earnings_week"] = (g["event_type"] == "earnings").astype(int)
-
-        # Is dividend week
-        df.loc[idx, "is_dividend_week"] = (g["event_type"] == "dividend").astype(int)
-
-        # Events this month (rolling count)
-        monthly = g.set_index("date").resample("ME").size()
-        monthly_counts = monthly.reindex(g["date"], method="ffill")
-        df.loc[idx, "events_this_month"] = monthly_counts.values
+        # Number of events in the same calendar month as each event.
+        month_periods = g["date"].dt.to_period("M")
+        df.loc[idx, "events_this_month"] = month_periods.map(
+            month_periods.value_counts()
+        ).values
 
     updates = df[["id", "days_to_next_event", "days_since_last_event",
                    "is_earnings_week", "is_dividend_week", "events_this_month"]].copy()
