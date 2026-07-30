@@ -73,13 +73,13 @@ class MLPClassifier(nn.Module):
 
 
 def _train_loop(model, train_loader, val_loader, lr=1e-3, epochs=50,
-                patience=10, use_amp=True, verbose=False):
+                patience=30, use_amp=True, verbose=False):
     """Shared training loop for MLP models."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     criterion = nn.MSELoss()
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
     scaler = GradScaler(enabled=use_amp and device.type == "cuda")
 
     best_val_loss = float("inf")
@@ -95,6 +95,8 @@ def _train_loop(model, train_loader, val_loader, lr=1e-3, epochs=50,
                 pred = model(X_batch)
                 loss = criterion(pred, y_batch)
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
 
@@ -124,7 +126,7 @@ def _train_loop(model, train_loader, val_loader, lr=1e-3, epochs=50,
 
 def train_regressor(X_train, y_train, X_val=None, y_val=None,
                     hidden_sizes=[256, 128], dropout=0.2, lr=1e-3,
-                    epochs=50, batch_size=64, patience=10, verbose=False):
+                    epochs=50, batch_size=64, patience=30, verbose=False):
     """Train MLP regressor for OHLC prediction."""
     input_size = X_train.shape[1]
     output_size = y_train.shape[1]
@@ -145,7 +147,7 @@ def train_regressor(X_train, y_train, X_val=None, y_val=None,
 
 def train_classifier(X_train, y_train, X_val=None, y_val=None,
                      hidden_sizes=[256, 128], dropout=0.2, lr=1e-3,
-                     epochs=50, batch_size=64, patience=10, verbose=False):
+                     epochs=50, batch_size=64, patience=30, verbose=False):
     """Train MLP classifier for direction prediction."""
     input_size = X_train.shape[1]
     output_size = y_train.shape[1]
@@ -166,16 +168,20 @@ def train_classifier(X_train, y_train, X_val=None, y_val=None,
 
 def predict_regressor(model, X):
     """Predict OHLC values."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
     model.eval()
     with torch.no_grad():
-        return model(torch.FloatTensor(X)).numpy()
+        return model(torch.FloatTensor(X).to(device)).cpu().numpy()
 
 
 def predict_classifier(model, X):
     """Predict direction and probabilities."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
     model.eval()
     with torch.no_grad():
-        probs = model(torch.FloatTensor(X)).numpy()
+        probs = model(torch.FloatTensor(X).to(device)).cpu().numpy()
     y_pred = (probs > 0.5).astype(int)
     return y_pred, probs
 
