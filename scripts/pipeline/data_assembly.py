@@ -8,6 +8,7 @@ Filtered to 5 tickers: NVDA, GOOGL, AVGO, AMD, TSM.
 
 import os
 import sys
+import pickle
 import numpy as np
 import pandas as pd
 from sqlalchemy import text
@@ -186,13 +187,48 @@ def add_targets(df):
     return df
 
 
-def split_shared_and_per_ticker_cols(df, feature_cols):
+SCHEMA_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "joint_schema.pkl"
+)
+
+
+def save_joint_schema(shared_cols, per_ticker_cols):
+    """Persist the train-derived shared/per-ticker split."""
+    os.makedirs(os.path.dirname(SCHEMA_PATH), exist_ok=True)
+    with open(SCHEMA_PATH, "wb") as f:
+        pickle.dump({"shared": list(shared_cols), "per_ticker": list(per_ticker_cols)}, f)
+
+
+def load_joint_schema():
+    """Load the train-derived schema, or None when absent."""
+    if not os.path.exists(SCHEMA_PATH):
+        return None
+    with open(SCHEMA_PATH, "rb") as f:
+        d = pickle.load(f)
+    return d.get("shared"), d.get("per_ticker")
+
+
+def split_shared_and_per_ticker_cols(df, feature_cols, schema=None):
     """Classify feature columns as shared (industry-level) or ticker-specific.
 
     A column is 'shared' when, within a given date, it holds the same value for
     every ticker (market indicators, industry news/NLP features). Those are kept
     once. Everything else genuinely varies per ticker and is widened.
+
+    When `schema` is given (always, for val/test) the train-time classification
+    is reused. Re-deriving it per split was a correctness bug: a column that
+    happens to be constant within a smaller split looks 'shared' there but
+    'per-ticker' in train, so the same feature landed in different column names
+    across splits. That produced 1351/666/5612-column frames for train/val/test
+    and forced prepare_data to invent ~1000 all-zero columns for val.
     """
+    if schema is not None:
+        train_shared, train_per_ticker = schema
+        present = set(feature_cols)
+        shared = [c for c in train_shared if c in present]
+        per_ticker = [c for c in train_per_ticker if c in present]
+        return shared, per_ticker
+
     if df.empty:
         return [], list(feature_cols)
 
@@ -212,7 +248,7 @@ def split_shared_and_per_ticker_cols(df, feature_cols):
     return shared, per_ticker
 
 
-def pivot_to_joint(df, feature_cols):
+def pivot_to_joint(df, feature_cols, schema=None):
     """Collapse the long (ticker, date) frame into one row per date.
 
     One row per date holds every ticker's features (prefixed with the ticker)
@@ -220,7 +256,7 @@ def pivot_to_joint(df, feature_cols):
     real values rather than NaN-filled zeros. This is the single joint model
     formulation: one model predicting all tickers at once.
     """
-    shared_cols, per_ticker_cols = split_shared_and_per_ticker_cols(df, feature_cols)
+    shared_cols, per_ticker_cols = split_shared_and_per_ticker_cols(df, feature_cols, schema=schema)
 
     dates = pd.Index(sorted(df["date"].unique()), name="date")
     out = pd.DataFrame(index=dates)
@@ -296,6 +332,98 @@ def create_sequences(X, y_reg, y_cls, seq_len=SEQ_LEN, groups=None):
 
 
 
+FEATURE_SCALER_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "feature_scaler.pkl"
+)
+
+
+def fit_feature_scaler(X):
+    """Fit a StandardScaler over the assembled joint feature matrix (train only).
+
+    preprocess.py scales only named price/return/sentiment columns, so the NLP
+    and embedding features (Word2Vec, BERT, TF-IDF counts, keyword counts) reach
+    the models unscaled and sit orders of magnitude away from the scaled ones.
+    That mismatch is what stopped logistic regression from converging and it
+    also hurts every other distance- and gradient-based model.
+    """
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    scaler.fit(np.asarray(X, dtype=np.float64))
+    os.makedirs(os.path.dirname(FEATURE_SCALER_PATH), exist_ok=True)
+    with open(FEATURE_SCALER_PATH, "wb") as f:
+        pickle.dump(scaler, f)
+    return scaler
+
+
+def load_feature_scaler():
+    if not os.path.exists(FEATURE_SCALER_PATH):
+        return None
+    with open(FEATURE_SCALER_PATH, "rb") as f:
+        return pickle.load(f)
+
+
+def apply_feature_scaler(X, scaler):
+    """Apply the train-fitted scaler; returns float32 for torch."""
+    if scaler is None or X is None:
+        return X
+    Xs = scaler.transform(np.asarray(X, dtype=np.float64))
+    return np.nan_to_num(Xs, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+
+def create_sequences_with_context(X, y_reg, y_cls, context=None, seq_len=SEQ_LEN):
+    """Emit one sequence per row of X, using history from the previous split.
+
+    Without context the first `seq_len` rows of a split cannot form a window, so
+    val/test lost their first 30 days (322 rows -> 292 sequences) and no longer
+    lined up with their own targets.
+
+    `context` is the tail of the chronologically preceding split. A window for
+    label row j spans the `seq_len` rows immediately *before* j, exactly as in
+    training, so the model never sees the day it is predicting. Borrowing prior
+    rows only supplies past inputs and introduces no leakage.
+
+    Returns (X_seq, y_reg_seq, y_cls_seq, label_idx) where label_idx gives the
+    row of X each sequence predicts, for aligning dates and metadata.
+    """
+    X = np.asarray(X, dtype=np.float32)
+    n_feat = X.shape[1] if X.ndim > 1 else 0
+
+    if context is not None and len(context) > 0:
+        ctx = np.asarray(context, dtype=np.float32)[-seq_len:]
+        if ctx.shape[1] != n_feat:
+            raise ValueError(
+                f"context has {ctx.shape[1]} features but split has {n_feat}; "
+                "both splits must be aligned to the same feature schema."
+            )
+    else:
+        ctx = np.empty((0, n_feat), dtype=np.float32)
+
+    X_full = np.vstack([ctx, X]) if len(ctx) else X
+    offset = len(ctx)
+
+    X_seq, y_reg_seq, y_cls_seq, label_idx = [], [], [], []
+    for j in range(len(X)):
+        end = offset + j          # exclusive: window stops before the label row
+        start = end - seq_len
+        if start < 0:
+            continue              # insufficient history even with context
+        X_seq.append(X_full[start:end])
+        y_reg_seq.append(y_reg[j])
+        y_cls_seq.append(y_cls[j])
+        label_idx.append(j)
+
+    if not X_seq:
+        return (np.empty((0, seq_len, n_feat), dtype=np.float32),
+                np.empty((0, y_reg.shape[1]), dtype=np.float32),
+                np.empty((0, y_cls.shape[1]), dtype=np.float32),
+                np.empty((0,), dtype=int))
+
+    return (np.asarray(X_seq, dtype=np.float32),
+            np.asarray(y_reg_seq, dtype=np.float32),
+            np.asarray(y_cls_seq, dtype=np.float32),
+            np.asarray(label_idx, dtype=int))
+
+
 def prepare_data(split="train", feature_cols=None):
     """
     Full data preparation pipeline.
@@ -331,8 +459,23 @@ def prepare_data(split="train", feature_cols=None):
 
     # Collapse to one row per date so a single model predicts all tickers
     # jointly, and every ticker's targets on a row are real values.
+    #
+    # train derives the shared/per-ticker schema and persists it; val/test reuse
+    # it so identical features occupy identical columns in all three splits.
     print(f"  Pivoting to joint rows (one per date)...")
-    df, all_feature_cols = pivot_to_joint(df, long_feature_cols)
+    is_train = (split == "train") and (feature_cols is None)
+    if is_train:
+        shared, per_ticker = split_shared_and_per_ticker_cols(df, long_feature_cols)
+        save_joint_schema(shared, per_ticker)
+        schema = (shared, per_ticker)
+        print(f"  Schema: {len(shared)} shared + {len(per_ticker)} per-ticker cols (saved)")
+    else:
+        schema = load_joint_schema()
+        if schema is None:
+            print("  WARNING: no saved joint schema; deriving from this split "
+                  "(column names may not match train)")
+
+    df, all_feature_cols = pivot_to_joint(df, long_feature_cols, schema=schema)
     print(f"  Joint shape: {df.shape}")
 
     if df.empty:
@@ -344,11 +487,18 @@ def prepare_data(split="train", feature_cols=None):
 
     # Align to training feature columns if provided
     if feature_cols is not None:
-        # Add missing columns as 0, drop extra columns
-        for c in feature_cols:
-            if c not in df.columns:
-                df[c] = 0.0
+        missing = [c for c in feature_cols if c not in df.columns]
+        for c in missing:
+            df[c] = 0.0
         final_cols = feature_cols
+        if missing:
+            # Loud, because zero-filled columns are silent model degradation:
+            # the split is being scored on features it does not actually have.
+            pct = 100.0 * len(missing) / max(len(feature_cols), 1)
+            print(f"  WARNING: {len(missing)} of {len(feature_cols)} feature columns "
+                  f"({pct:.1f}%) missing in '{split}' and zero-filled.")
+            if pct > 25:
+                print(f"           Examples: {missing[:5]}")
     else:
         final_cols = all_feature_cols
 
@@ -367,17 +517,30 @@ def prepare_data(split="train", feature_cols=None):
 
 def prepare_sequences(X_train, y_reg_train, y_cls_train,
                       X_val, y_reg_val, y_cls_val,
-                      X_test, y_reg_test, y_cls_test):
-    """Create sequences for all splits."""
+                      X_test, y_reg_test, y_cls_test,
+                      return_index=False):
+    """Create sequences for all splits.
+
+    Val and test are seeded with the tail of the chronologically preceding
+    split, so every one of their rows gets a prediction instead of losing the
+    first SEQ_LEN. The borrowed rows are inputs only: each window still ends the
+    day before the row being predicted.
+    """
     print("  Creating sequences...")
-    X_tr, y_reg_tr, y_cls_tr = create_sequences(X_train, y_reg_train, y_cls_train)
-    X_v, y_reg_v, y_cls_v = create_sequences(X_val, y_reg_val, y_cls_val)
-    X_te, y_reg_te, y_cls_te = create_sequences(X_test, y_reg_test, y_cls_test)
+    X_tr, y_reg_tr, y_cls_tr, idx_tr = create_sequences_with_context(
+        X_train, y_reg_train, y_cls_train, context=None)
+    X_v, y_reg_v, y_cls_v, idx_v = create_sequences_with_context(
+        X_val, y_reg_val, y_cls_val, context=X_train)
+    X_te, y_reg_te, y_cls_te, idx_te = create_sequences_with_context(
+        X_test, y_reg_test, y_cls_test, context=X_val)
 
     print(f"  Train: {X_tr.shape}")
-    print(f"  Val: {X_v.shape}")
-    print(f"  Test: {X_te.shape}")
+    print(f"  Val: {X_v.shape}  (all {len(X_val)} rows covered via train context)")
+    print(f"  Test: {X_te.shape}  (all {len(X_test)} rows covered via val context)")
 
+    if return_index:
+        return (X_tr, y_reg_tr, y_cls_tr, X_v, y_reg_v, y_cls_v,
+                X_te, y_reg_te, y_cls_te, idx_tr, idx_v, idx_te)
     return X_tr, y_reg_tr, y_cls_tr, X_v, y_reg_v, y_cls_v, X_te, y_reg_te, y_cls_te
 
 
