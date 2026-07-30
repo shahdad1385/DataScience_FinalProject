@@ -27,52 +27,51 @@ class PositionalEncoding(nn.Module):
         self.register_buffer("pe", pe)
 
     def forward(self, x):
-        """
-        Args:
-            x: (batch, seq_len, d_model)
-        Returns:
-            (batch, seq_len, d_model) with positional encoding added
-        """
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
+
+
+class _EncoderLayer(nn.Module):
+    """TransformerEncoderLayer built from scratch to avoid torch.empty() kwarg bug on Kaggle."""
+
+    def __init__(self, d_model, nhead, dropout=0.1, batch_first=True, activation="gelu"):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=batch_first)
+        self.linear1 = nn.Linear(d_model, d_model * 4)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(d_model * 4, d_model)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.activation = nn.GELU() if activation == "gelu" else nn.ReLU()
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, **kwargs):
+        q = k = v = src
+        src2, _ = self.self_attn(q, k, v, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+        return src
 
 
 class StockTransformer(nn.Module):
     def __init__(self, input_size, d_model=128, nhead=8, num_layers=2,
                  dropout=0.2, n_tickers=5, max_len=500):
-        """
-        Args:
-            input_size: number of input features per timestep
-            d_model: model dimension (must be divisible by nhead)
-            nhead: number of attention heads
-            num_layers: number of Transformer encoder layers
-            dropout: dropout rate
-            n_tickers: number of tickers to predict
-            max_len: maximum sequence length for positional encoding
-        """
         super().__init__()
         self.input_proj = nn.Linear(input_size, d_model)
         self.pos_encoding = PositionalEncoding(d_model, max_len, dropout)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model, nhead, dropout, batch_first=True, activation="gelu",
-        )
+        encoder_layer = _EncoderLayer(d_model, nhead, dropout, batch_first=True, activation="gelu")
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
         self.shared_fc = nn.Linear(d_model, 128)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
-        # Regression head: OHLC × n_tickers
         self.reg_head = nn.Linear(128, n_tickers * 4)
-        # Classification head: direction × n_tickers
         self.cls_head = nn.Linear(128, n_tickers)
 
     def forward(self, x):
-        """
-        Args:
-            x: (batch, seq_len, input_size)
-        Returns:
-            reg: (batch, n_tickers * 4) — OHLC predictions
-            cls: (batch, n_tickers) — direction probabilities (0-1)
-        """
         x = self.input_proj(x)
         x = self.pos_encoding(x)
         out = self.transformer(x)
@@ -86,5 +85,4 @@ class StockTransformer(nn.Module):
 
 def create_model(input_size, d_model=128, nhead=8, num_layers=2,
                  dropout=0.2, n_tickers=5):
-    """Factory function to create Transformer model."""
     return StockTransformer(input_size, d_model, nhead, num_layers, dropout, n_tickers)
