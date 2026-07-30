@@ -167,26 +167,48 @@ def train_model(model, train_loader, val_loader, lr=1e-3, epochs=200,
 
 
 def save_model(model, name, input_size, **kwargs):
-    """Save trained model to disk."""
+    """Save trained model to disk.
+
+    input_size must be the real per-timestep feature count and kwargs the real
+    constructor arguments, otherwise the model cannot be rebuilt on load.
+    """
+    if not input_size or int(input_size) <= 0:
+        raise ValueError(f"save_model({name}): invalid input_size={input_size!r}")
     os.makedirs(MODELS_DIR, exist_ok=True)
     path = os.path.join(MODELS_DIR, f"{name}.pt")
     torch.save({
         "model_state_dict": model.state_dict(),
-        "input_size": input_size,
-        "kwargs": kwargs,
+        "input_size": int(input_size),
+        "kwargs": dict(kwargs),
     }, path)
     return path
 
 
-def load_model(model_class, name, device="cpu"):
-    """Load trained model from disk."""
+def load_model(model_class, name, device="cpu", default_kwargs=None):
+    """Load trained model from disk.
+
+    Rebuilds using the input_size and kwargs stored at save time. Loads weights
+    strictly: a silent shape mismatch here would produce a model that returns
+    predictions from partially random weights.
+    """
     path = os.path.join(MODELS_DIR, f"{name}.pt")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"No checkpoint at {path}. Train before evaluating.")
     checkpoint = torch.load(path, map_location=device)
-    model = model_class(
-        input_size=checkpoint["input_size"],
-        **checkpoint["kwargs"],
-    )
-    model.load_state_dict(checkpoint["model_state_dict"])
+
+    kwargs = dict(default_kwargs or {})
+    kwargs.update(checkpoint.get("kwargs") or {})
+
+    input_size = checkpoint.get("input_size")
+    if not input_size:
+        raise ValueError(
+            f"{path} has no usable input_size ({input_size!r}); it was written by "
+            "an older buggy save path. Retrain to regenerate the checkpoint."
+        )
+
+    model = model_class(input_size=input_size, **kwargs)
+    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    model.eval()
     return model
 
 

@@ -64,7 +64,7 @@ def train_all(X_train, y_reg_train, y_cls_train,
             print(f"\n{'='*40}")
             print(f"  Training {name.upper()}")
             print(f"{'='*40}")
-        model = mod.create_model(input_size, n_tickers=n_tickers)
+        model = _build(mod, input_size, n_tickers=n_tickers)
         model, hist = train_model(
             model, train_loader, val_loader,
             lr=lr, epochs=epochs, patience=patience,
@@ -88,6 +88,32 @@ def train_all(X_train, y_reg_train, y_cls_train,
             print(f"\n  Prophet: skipped (not installed or no tickers)")
 
     return results
+
+
+def _build(mod, input_size, **kwargs):
+    """Create a model and record exactly how it was built.
+
+    save_model needs the real constructor arguments to rebuild the model later.
+    Recovering them after the fact (e.g. reading reg_head.in_features) yields the
+    shared-layer width, not input_size, so the reloaded model had the wrong
+    shape and load_state_dict failed. Stashing them here keeps the checkpoint
+    faithful to the object that was trained.
+    """
+    model = mod.create_model(input_size, **kwargs)
+    model._build_input_size = input_size
+    model._build_kwargs = dict(kwargs)
+    return model
+
+
+def get_build_config(model, fallback_input_size=None, fallback_kwargs=None):
+    """Return (input_size, kwargs) recorded by _build, with fallbacks."""
+    input_size = getattr(model, "_build_input_size", None)
+    if input_size is None:
+        input_size = fallback_input_size
+    kwargs = getattr(model, "_build_kwargs", None)
+    if kwargs is None:
+        kwargs = dict(fallback_kwargs or {})
+    return input_size, dict(kwargs)
 
 
 def _validate(model, loader, device):
@@ -133,7 +159,7 @@ def train_single(model_name, X_train, y_reg_train, y_cls_train,
         extra_kwargs["hidden_size"] = hidden_size
         extra_kwargs["num_layers"] = n_layers
 
-    model = mod.create_model(input_size, **extra_kwargs)
+    model = _build(mod, input_size, **extra_kwargs)
 
     train_loader = _make_loader(X_train, y_reg_train, y_cls_train, batch_size, shuffle=True)
     val_loader = _make_loader(X_val, y_reg_val, y_cls_val, batch_size, shuffle=False)
@@ -161,21 +187,32 @@ def select_best(results):
     return best_name, results[best_name]
 
 
-def save_best(best_name, best_result, input_size, **kwargs):
-    """Save the best model to disk."""
+def save_best(best_name, best_result, input_size=None, **kwargs):
+    """Save a trained model, preferring the config it was actually built with."""
     model = best_result["model"]
-    return save_model(model, f"timeseries_{best_name}", input_size, **kwargs)
+    real_input_size, real_kwargs = get_build_config(model, input_size, kwargs)
+    if real_input_size is None:
+        raise ValueError(
+            f"Cannot save timeseries_{best_name}: input_size unknown. "
+            "Build models through _build/train_single so the config is recorded."
+        )
+    return save_model(model, f"timeseries_{best_name}", real_input_size, **real_kwargs)
 
 
 def load_best(name, n_tickers=5):
-    """Load a trained model from disk."""
+    """Load a trained model from disk.
+
+    The checkpoint carries input_size and the constructor kwargs, so nothing is
+    passed positionally here. Previously n_tickers was forwarded into
+    load_model(), which does not accept it, raising TypeError on every load.
+    """
     model_map = {
         "lstm": lstm, "gru": gru, "transformer": transformer,
         "bilstm": bilstm, "tcn": tcn,
     }
     if name in model_map:
         mod = model_map[name]
-        return load_model(mod.create_model, f"timeseries_{name}", n_tickers=n_tickers)
+        return load_model(mod.create_model, f"timeseries_{name}", default_kwargs={"n_tickers": n_tickers})
     elif name == "prophet":
         raise ValueError("Prophet models are saved per-ticker, use prophet_model.load_per_ticker()")
     else:
