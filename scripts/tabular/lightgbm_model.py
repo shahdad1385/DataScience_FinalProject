@@ -18,68 +18,116 @@ from .classify import evaluate_classification
 
 
 def train_regressor(X_train, y_train, X_val=None, y_val=None,
-                    n_estimators=300, max_depth=5, learning_rate=0.05,
-                    num_leaves=31, verbose=-1):
-    """Train LightGBM regressor for OHLC prediction."""
+                    n_estimators=100, max_depth=5, learning_rate=0.05,
+                    num_leaves=31, early_stopping_rounds=20, verbose=-1):
+    """Train LightGBM regressor for OHLC prediction.
+
+    Trains one model per target column (LightGBM doesn't support multi-output).
+    Returns a list of models (one per column).
+    """
     if not HAS_LIGHTGBM:
         raise ImportError("lightgbm not installed. Run: pip install lightgbm")
 
-    params = {
-        "n_estimators": n_estimators,
-        "max_depth": max_depth,
-        "learning_rate": learning_rate,
-        "num_leaves": num_leaves,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "random_state": 42,
-        "n_jobs": -1,
-        "verbose": verbose,
-    }
-    model = lgb.LGBMRegressor(**params)
+    n_targets = y_train.shape[1]
+    if n_targets == 1:
+        y_train = y_train.ravel()
+        if y_val is not None:
+            y_val = y_val.ravel()
 
-    eval_set = [(X_val, y_val)] if X_val is not None else None
-    model.fit(
-        X_train, y_train,
-        eval_set=eval_set,
-    )
-    return model
+    models = []
+    for col in range(n_targets):
+        y_col = y_train[:, col] if n_targets > 1 else y_train
+        y_val_col = y_val[:, col] if (y_val is not None and n_targets > 1) else y_val
+
+        params = {
+            "n_estimators": n_estimators,
+            "max_depth": max_depth,
+            "learning_rate": learning_rate,
+            "num_leaves": num_leaves,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "random_state": 42,
+            "n_jobs": -1,
+            "verbose": verbose,
+        }
+        model = lgb.LGBMRegressor(**params)
+
+        fit_params = {}
+        if X_val is not None:
+            fit_params["eval_set"] = [(X_val, y_val_col)]
+            fit_params["callbacks"] = [lgb.early_stopping(early_stopping_rounds, verbose=False)]
+        model.fit(X_train, y_col, **fit_params)
+        models.append(model)
+
+    return models
 
 
 def train_classifier(X_train, y_train, X_val=None, y_val=None,
-                     n_estimators=300, max_depth=5, learning_rate=0.05,
-                     num_leaves=31, verbose=-1):
-    """Train LightGBM classifier for direction prediction."""
+                     n_estimators=100, max_depth=5, learning_rate=0.05,
+                     num_leaves=31, early_stopping_rounds=20, verbose=-1):
+    """Train LightGBM classifier for direction prediction.
+
+    Trains one model per target column (LightGBM doesn't support multi-output).
+    Returns a list of models (one per column).
+    """
     if not HAS_LIGHTGBM:
         raise ImportError("lightgbm not installed. Run: pip install lightgbm")
 
-    params = {
-        "n_estimators": n_estimators,
-        "max_depth": max_depth,
-        "learning_rate": learning_rate,
-        "num_leaves": num_leaves,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "random_state": 42,
-        "n_jobs": -1,
-        "verbose": verbose,
-    }
-    model = lgb.LGBMClassifier(**params)
+    n_targets = y_train.shape[1]
+    if n_targets == 1:
+        y_train = y_train.ravel()
+        if y_val is not None:
+            y_val = y_val.ravel()
 
-    eval_set = [(X_val, y_val)] if X_val is not None else None
-    model.fit(
-        X_train, y_train,
-        eval_set=eval_set,
-    )
-    return model
+    models = []
+    for col in range(n_targets):
+        y_col = y_train[:, col] if n_targets > 1 else y_train
+        y_val_col = y_val[:, col] if (y_val is not None and n_targets > 1) else y_val
+
+        params = {
+            "n_estimators": n_estimators,
+            "max_depth": max_depth,
+            "learning_rate": learning_rate,
+            "num_leaves": num_leaves,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "random_state": 42,
+            "n_jobs": -1,
+            "verbose": verbose,
+            "objective": "binary",
+            "eval_metric": "logloss",
+        }
+        model = lgb.LGBMClassifier(**params)
+
+        fit_params = {}
+        if X_val is not None:
+            fit_params["eval_set"] = [(X_val, y_val_col)]
+            fit_params["callbacks"] = [lgb.early_stopping(early_stopping_rounds, verbose=False)]
+        model.fit(X_train, y_col, **fit_params)
+        models.append(model)
+
+    return models
 
 
 def predict_regressor(model, X):
-    """Predict OHLC values."""
+    """Predict OHLC values. model is a list of per-column models."""
+    if isinstance(model, list):
+        preds = [m.predict(X).reshape(-1, 1) for m in model]
+        return np.hstack(preds)
     return model.predict(X)
 
 
 def predict_classifier(model, X):
-    """Predict direction and probabilities."""
+    """Predict direction and probabilities. model is a list of per-column models."""
+    if isinstance(model, list):
+        preds = []
+        probs = []
+        for m in model:
+            p = m.predict(X)
+            pr = m.predict_proba(X)[:, 1]
+            preds.append(p.reshape(-1, 1))
+            probs.append(pr.reshape(-1, 1))
+        return np.hstack(preds).astype(int), np.hstack(probs)
     y_pred = model.predict(X)
     y_prob = model.predict_proba(X)[:, 1]
     return y_pred, y_prob
