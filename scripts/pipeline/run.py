@@ -15,6 +15,7 @@ from .predict import load_models, predict_all, save_predictions_to_db
 from ..nlp import extract as nlp_extract
 from ..clustering import cluster
 from ..nlp import word2vec as w2v_module
+from ..preprocessing.preprocess import run_preprocessing
 
 SPLITS = ["train", "val", "test"]
 
@@ -22,7 +23,7 @@ SPLITS = ["train", "val", "test"]
 def run_nlp_features():
     """Run NLP feature extraction on all splits."""
     print("\n" + "=" * 60)
-    print("STEP 1: NLP FEATURE EXTRACTION")
+    print("STEP 2: NLP FEATURE EXTRACTION")
     print("=" * 60)
     nlp_extract.main()
 
@@ -30,7 +31,7 @@ def run_nlp_features():
 def run_clustering():
     """Run clustering on NLP features for all splits."""
     print("\n" + "=" * 60)
-    print("STEP 2: CLUSTERING")
+    print("STEP 3: CLUSTERING")
     print("=" * 60)
 
     from scripts.db import get_engine
@@ -81,7 +82,7 @@ def run_clustering():
 def run_training():
     """Run full model training."""
     print("\n" + "=" * 60)
-    print("STEP 3: MODEL TRAINING")
+    print("STEP 4: MODEL TRAINING")
     print("=" * 60)
     return train_all_models(verbose=True)
 
@@ -89,7 +90,7 @@ def run_training():
 def run_prediction(results=None):
     """Run prediction on test set."""
     print("\n" + "=" * 60)
-    print("STEP 4: PREDICTION")
+    print("STEP 5: PREDICTION")
     print("=" * 60)
     models = load_models()
     if not models:
@@ -118,7 +119,13 @@ def run_pipeline(skip_nlp=False, skip_clustering=False):
     print("CAF STOCK PREDICTION — FULL PIPELINE")
     print("=" * 60)
 
-    # Step 1: NLP features
+    # Step 1: Preprocessing (creates split tables)
+    print("\n" + "=" * 60)
+    print("STEP 1: PREPROCESSING")
+    print("=" * 60)
+    run_preprocessing()
+
+    # Step 2: NLP features
     if not skip_nlp:
         run_nlp_features()
     else:

@@ -68,7 +68,7 @@ Examples:
     parser.add_argument("--skip-clustering", action="store_true", help="Skip clustering step")
     parser.add_argument("--epochs", type=int, default=100, help="Max training epochs")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
+    parser.add_argument("--patience", type=int, default=30, help="Early stopping patience")
     parser.add_argument("--verbose", action="store_true", default=True, help="Verbose output")
 
     # Evaluation flags
