@@ -46,8 +46,8 @@ def load_hyperparams():
     return {}
 
 
-def train_all_models(verbose=True, model_filter=None, epochs=100, lr=1e-3,
-                     patience=10, skip_nlp=False):
+def train_all_models(verbose=True, model_filter=None, epochs=200, lr=1e-3,
+                     patience=30, skip_nlp=False):
     """
     Full training pipeline.
 
@@ -439,9 +439,10 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 if os.path.exists(pkl_path):
                     with open(pkl_path, "rb") as f:
                         model = pickle.load(f)
-                    if model_name in ("xgboost", "lightgbm", "random_forest"):
-                        pred_reg = model.predict(X_te_flat)
-                    elif model_name == "ridge":
+                    if model_name == "lightgbm":
+                        from ..tabular.lightgbm_model import predict_regressor as lgb_predict
+                        pred_reg = lgb_predict(model, X_te_flat)
+                    elif model_name in ("xgboost", "random_forest", "ridge"):
                         pred_reg = model.predict(X_te_flat)
                     else:
                         continue
@@ -460,7 +461,10 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 if os.path.exists(cls_pkl_path):
                     with open(cls_pkl_path, "rb") as f:
                         cls_model = pickle.load(f)
-                    if model_name in ("xgboost", "lightgbm", "random_forest"):
+                    if model_name == "lightgbm":
+                        from ..tabular.lightgbm_model import predict_classifier as lgb_predict
+                        pred_cls, prob_cls = lgb_predict(cls_model, X_te_flat)
+                    elif model_name in ("xgboost", "random_forest"):
                         pred_cls = cls_model.predict(X_te_flat)
                         prob_cls = cls_model.predict_proba(X_te_flat)
                     elif model_name == "logistic":
