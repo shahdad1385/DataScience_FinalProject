@@ -1,5 +1,6 @@
 import sys
 import os
+import pickle
 import pandas as pd
 import numpy as np
 from sqlalchemy import text
@@ -15,16 +16,82 @@ TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
 # test gets the remaining 0.15
 
+# Scalers are persisted here so predictions (which are produced in scaled
+# space) can be inverse-transformed back to real dollar prices.
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+SCALERS_DIR = os.path.join(MODELS_DIR, "scalers")
+
+
+def save_scalers(table_name, robust_scaler, robust_cols, standard_scaler, standard_cols):
+    """Persist the train-fitted scalers + their column order for a table."""
+    os.makedirs(SCALERS_DIR, exist_ok=True)
+    payload = {
+        "robust_scaler": robust_scaler,
+        "robust_cols": list(robust_cols),
+        "standard_scaler": standard_scaler,
+        "standard_cols": list(standard_cols),
+    }
+    with open(os.path.join(SCALERS_DIR, f"{table_name}.pkl"), "wb") as f:
+        pickle.dump(payload, f)
+
+
+def load_scalers(table_name):
+    """Load persisted scalers for a table, or None if not available."""
+    path = os.path.join(SCALERS_DIR, f"{table_name}.pkl")
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
+def inverse_transform_column(table_name, column, values):
+    """Map scaled values for a single column back to their original units.
+
+    Returns values unchanged if no scaler was persisted for that table/column.
+    """
+    artifacts = load_scalers(table_name)
+    if artifacts is None:
+        return np.asarray(values, dtype=float)
+
+    values = np.asarray(values, dtype=float)
+
+    robust_cols = artifacts.get("robust_cols") or []
+    scaler = artifacts.get("robust_scaler")
+    if scaler is not None and column in robust_cols:
+        i = robust_cols.index(column)
+        return values * scaler.scale_[i] + scaler.center_[i]
+
+    standard_cols = artifacts.get("standard_cols") or []
+    scaler = artifacts.get("standard_scaler")
+    if scaler is not None and column in standard_cols:
+        i = standard_cols.index(column)
+        return values * scaler.scale_[i] + scaler.mean_[i]
+
+    return values
+
+
 
 def compute_cutoff_dates(df):
-    """Compute two cutoff dates for 70/15/15 split."""
-    unique_dates = np.sort(df["date"].unique())
-    n_dates = len(unique_dates)
-    cutoff1_idx = int(n_dates * TRAIN_RATIO)
-    cutoff2_idx = int(n_dates * (TRAIN_RATIO + VAL_RATIO))
-    cutoff1 = pd.Timestamp(unique_dates[cutoff1_idx])
-    cutoff2 = pd.Timestamp(unique_dates[cutoff2_idx])
-    return cutoff1, cutoff2
+    """Compute two cutoff dates for a 70/15/15 temporal split.
+
+    The split is computed over UNIQUE dates, not row counts. Row-count
+    percentiles are unusable here because the merged news table is heavily
+    skewed towards recent dates, which pushed both cutoffs into the last two
+    months and left the price history with almost no val/test rows.
+
+    Unique trading dates give each split a real share of the timeline, which is
+    what the sequence models need (each split must span far more than SEQ_LEN).
+    """
+    dates = pd.to_datetime(pd.Series(df["date"].unique())).sort_values().reset_index(drop=True)
+    n = len(dates)
+    if n < 3:
+        raise ValueError(f"Not enough distinct dates to split: {n}")
+
+    cutoff1_idx = min(max(int(n * TRAIN_RATIO) - 1, 0), n - 3)
+    cutoff2_idx = min(max(int(n * (TRAIN_RATIO + VAL_RATIO)) - 1, cutoff1_idx + 1), n - 2)
+
+    return pd.Timestamp(dates.iloc[cutoff1_idx]), pd.Timestamp(dates.iloc[cutoff2_idx])
+
 
 
 def apply_split(df, cutoff1, cutoff2):
@@ -125,8 +192,13 @@ def handle_nulls(train_df, val_df, test_df, numeric_cols, group_col=None):
     return train_df, val_df, test_df
 
 
-def normalize_features(train_df, val_df, test_df, numeric_cols):
-    """Fit scalers on train only, transform val and test."""
+def normalize_features(train_df, val_df, test_df, numeric_cols, table_name=None):
+    """Fit scalers on train only, transform val and test.
+
+    When table_name is given the fitted scalers are persisted so that model
+    predictions can later be inverse-transformed back into real units.
+    """
+
     robust_cols = [
         "open", "high", "low", "close", "volume",
         "volatility_7d", "volatility_14d", "volatility_30d",
@@ -154,6 +226,9 @@ def normalize_features(train_df, val_df, test_df, numeric_cols):
     ]
     standard_cols = [c for c in standard_cols if c in train_df.columns]
 
+    robust_scaler = None
+    standard_scaler = None
+
     applied = []
     if robust_cols and len(train_df) > 0:
         robust_scaler = RobustScaler()
@@ -175,10 +250,14 @@ def normalize_features(train_df, val_df, test_df, numeric_cols):
             test_df[standard_cols] = standard_scaler.transform(test_df[standard_cols])
         applied.append(f"StandardScaler: {len(standard_cols)} cols")
 
+    if table_name:
+        save_scalers(table_name, robust_scaler, robust_cols, standard_scaler, standard_cols)
+
     for line in applied:
         print(f"    {line}")
 
     return train_df, val_df, test_df
+
 
 
 def save_split(train_df, val_df, test_df, table_name):
@@ -213,7 +292,7 @@ def preprocess_stock_prices(cutoff1, cutoff2):
     train_df, val_df, test_df = handle_nulls(train_df, val_df, test_df, numeric_cols, group_col="ticker")
 
     print("  Normalizing:")
-    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols)
+    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols, table_name="stock_prices")
 
     save_split(train_df, val_df, test_df, "stock_prices")
 
@@ -233,7 +312,7 @@ def preprocess_market_indicators(cutoff1, cutoff2):
     train_df, val_df, test_df = handle_nulls(train_df, val_df, test_df, numeric_cols, group_col="indicator")
 
     print("  Normalizing:")
-    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols)
+    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols, table_name="market_indicators")
 
     save_split(train_df, val_df, test_df, "market_indicators")
 
@@ -260,7 +339,7 @@ def preprocess_news(cutoff1, cutoff2):
     train_df, val_df, test_df = handle_nulls(train_df, val_df, test_df, numeric_cols)
 
     print("  Normalizing:")
-    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols)
+    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols, table_name="news")
 
     save_split(train_df, val_df, test_df, "news")
 
@@ -287,7 +366,7 @@ def preprocess_social_sentiment(cutoff1, cutoff2):
     train_df, val_df, test_df = handle_nulls(train_df, val_df, test_df, numeric_cols)
 
     print("  Normalizing:")
-    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols)
+    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols, table_name="social_sentiment")
 
     save_split(train_df, val_df, test_df, "social_sentiment")
 
@@ -314,7 +393,7 @@ def preprocess_news_sentiment(cutoff1, cutoff2):
     train_df, val_df, test_df = handle_nulls(train_df, val_df, test_df, numeric_cols)
 
     print("  Normalizing:")
-    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols)
+    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols, table_name="news_sentiment")
 
     save_split(train_df, val_df, test_df, "news_sentiment")
 
@@ -324,12 +403,18 @@ def run_preprocessing():
     print("PREPROCESSING — ALL TABLES (70/15/15 split)")
     print("=" * 50)
 
-    print("\nStep 1: Compute cutoff dates from news articles...")
-    news_df = pd.read_sql("SELECT date FROM news ORDER BY date", engine, parse_dates=["date"])
-    cutoff1, cutoff2 = compute_cutoff_dates(news_df)
+    # Cutoffs come from the stock trading calendar, which covers the whole
+    # timeline. The news table only densely covers the last few months, so
+    # using it here collapsed val/test down to a handful of trading days.
+    print("\nStep 1: Compute cutoff dates from stock trading dates...")
+    date_df = pd.read_sql("SELECT date FROM stock_prices ORDER BY date", engine, parse_dates=["date"])
+    cutoff1, cutoff2 = compute_cutoff_dates(date_df)
+    n_dates = date_df["date"].nunique()
+    print(f"  Trading dates: {n_dates:,}")
     print(f"  Cutoff 1 (train/val): {cutoff1.date()}")
     print(f"  Cutoff 2 (val/test): {cutoff2.date()}")
     print(f"  (All tables will use these same cutoffs)")
+
 
     preprocess_stock_prices(cutoff1, cutoff2)
     preprocess_market_indicators(cutoff1, cutoff2)
@@ -365,7 +450,7 @@ def preprocess_economic_events(cutoff1, cutoff2):
     train_df, val_df, test_df = handle_nulls(train_df, val_df, test_df, numeric_cols)
 
     print("  Normalizing:")
-    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols)
+    train_df, val_df, test_df = normalize_features(train_df, val_df, test_df, numeric_cols, table_name="economic_events")
 
     save_split(train_df, val_df, test_df, "economic_events")
 
