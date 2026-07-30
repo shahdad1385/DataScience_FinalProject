@@ -50,6 +50,8 @@ def train_one_epoch(model, loader, optimizer, device, use_amp=True):
             loss, _, _ = combined_loss(reg_pred, cls_pred, y_reg, y_cls)
 
         scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
 
@@ -61,6 +63,7 @@ def train_one_epoch(model, loader, optimizer, device, use_amp=True):
 
 def validate(model, loader, device):
     """Validate model. Returns average loss and predictions (cls predictions are sigmoid-applied)."""
+    model = model.to(device)
     model.eval()
     total_loss = 0
     n_batches = 0
@@ -84,6 +87,13 @@ def validate(model, loader, device):
             all_reg_true.append(y_reg.cpu().numpy())
             all_cls_true.append(y_cls.cpu().numpy())
 
+    if n_batches == 0:
+        raise ValueError(
+            "Validation loader is empty — no sequences were produced for this split. "
+            "Each split must span more than SEQ_LEN dates; check the train/val/test "
+            "cutoffs in preprocessing."
+        )
+
     avg_loss = total_loss / max(n_batches, 1)
     return avg_loss, (
         np.concatenate(all_reg_pred),
@@ -93,8 +103,9 @@ def validate(model, loader, device):
     )
 
 
-def train_model(model, train_loader, val_loader, lr=1e-3, epochs=100,
-                patience=10, device=None, use_amp=True, verbose=True):
+
+def train_model(model, train_loader, val_loader, lr=1e-3, epochs=200,
+                patience=30, device=None, use_amp=True, verbose=True):
     """
     Full training loop with early stopping.
 
@@ -151,7 +162,6 @@ def train_model(model, train_loader, val_loader, lr=1e-3, epochs=100,
     # Load best model
     if best_state is not None:
         model.load_state_dict(best_state)
-    model = model.to("cpu")
 
     return model, history
 
