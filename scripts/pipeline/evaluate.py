@@ -9,11 +9,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, calibration_curve
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+try:
+    from sklearn.metrics import calibration_curve
+except ImportError:
+    from sklearn.calibration import calibration_curve
 from sklearn.inspection import permutation_importance
 import mlflow
 
-from ..data_assembly import TICKERS, SEQ_LEN
+from .data_assembly import TICKERS, SEQ_LEN
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
 EVAL_RESULTS_DIR = os.path.join(MODELS_DIR, "eval_results")
