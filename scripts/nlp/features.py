@@ -18,9 +18,26 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import LatentDirichletAllocation
 
 from . import word2vec as w2v_module
-from . import bert as bert_module
 
 warnings.filterwarnings("ignore")
+
+
+def _bert():
+    """Import the BERT helper lazily.
+
+    bert.py pulls in sentence_transformers -> transformers -> tensorflow. A
+    broken install anywhere in that chain used to make this whole module
+    unimportable, taking Word2Vec, TF-IDF, LDA and sentiment down with it even
+    when BERT was not requested. Importing on demand keeps the non-BERT feature
+    extractors usable and confines the failure to the BERT paths.
+    """
+    from . import bert as bert_module
+    return bert_module
+
+# Industry-level (non-ticker-specific) news is a real signal, not missing data.
+# Grouping on a NaN ticker silently drops those rows, so they carry an explicit
+# sentinel instead. data_assembly merges sentinel rows on date alone.
+INDUSTRY_TICKER = "__INDUSTRY__"
 
 
 # =============================================================================
@@ -51,8 +68,32 @@ def _get_texts(df):
     return texts
 
 
+def _flatten_columns(df):
+    """Collapse a MultiIndex column axis into flat snake_case names.
+
+    `df.groupby(...).agg({"compound": ["mean", "std"]})` produces a MultiIndex
+    column axis. Left alone, those columns reach SQL as the literal text
+    "('compound', 'mean')" and every downstream consumer that asks for
+    `compound_mean` silently finds nothing. Flatten to `compound_mean`.
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [
+            "_".join(str(part) for part in col if str(part) != "").strip("_")
+            for col in df.columns
+        ]
+    return df
+
+
 def _groupby(df, agg_dict):
-    return df.groupby(["ticker", "date"]).agg(agg_dict).reset_index()
+    """Aggregate per (ticker, date), keeping industry-level rows.
+
+    dropna=False is essential: pandas' default drops every group whose key
+    contains NaN, which silently discarded all industry-level news (no ticker).
+    Tickers are normalised to a sentinel upstream, but dropna=False keeps this
+    correct even if a NaN slips through.
+    """
+    out = df.groupby(["ticker", "date"], dropna=False).agg(agg_dict).reset_index()
+    return _flatten_columns(out)
 
 
 # =============================================================================
@@ -151,6 +192,7 @@ def extract_keywords_bert(df, bert_model, top_n=5, max_keywords=500):
     Returns top_n keywords per article, then counts them per (ticker, date).
     Keeps only the top max_keywords most frequent keywords as columns.
     """
+    bert_module = _bert()
     texts = _get_texts(df)
     all_keywords = []
     for text in texts:
@@ -260,10 +302,7 @@ def extract_word2vec(df, w2v_model):
         feat_df[f"w2v_{i}"] = embeddings[:, i]
 
     agg_dict = {col: "mean" for col in feat_df.columns if col.startswith("w2v_")}
-    agg = feat_df.groupby(["ticker", "date"]).agg(agg_dict).reset_index()
-    agg["date"] = feat_df.groupby(["ticker", "date"])["date"].first().values
-    agg["ticker"] = feat_df.groupby(["ticker", "date"])["ticker"].first().values
-    return agg
+    return _groupby(feat_df, agg_dict)
 
 
 # =============================================================================
@@ -307,10 +346,13 @@ def extract_bert(df, bert_model=None, pca=None, texts=None):
     if texts is None:
         texts = _get_texts(df)
 
+    bert_module = _bert()
     if bert_model is None:
-        raw = bert_module.encode(bert_module.load_model(), texts)
-        pca, reduced = bert_module.fit_pca(raw)
+        # Load once and reuse: the previous code loaded the model, encoded, then
+        # loaded a second copy, paying the model-init cost twice per split.
         bert_model = bert_module.load_model()
+        raw = bert_module.encode(bert_model, texts)
+        pca, reduced = bert_module.fit_pca(raw)
     else:
         raw = bert_module.encode(bert_model, texts, batch_size=64)
         reduced = bert_module.transform_pca(raw, pca)
@@ -320,9 +362,7 @@ def extract_bert(df, bert_model=None, pca=None, texts=None):
         feat_df[f"bert_{i}"] = reduced[:, i]
 
     agg_dict = {col: "mean" for col in feat_df.columns if col.startswith("bert_")}
-    agg = feat_df.groupby(["ticker", "date"]).agg(agg_dict).reset_index()
-    agg["date"] = feat_df.groupby(["ticker", "date"])["date"].first().values
-    agg["ticker"] = feat_df.groupby(["ticker", "date"])["ticker"].first().values
+    agg = _groupby(feat_df, agg_dict)
     return agg, bert_model, pca
 
 
@@ -332,7 +372,7 @@ def extract_bert(df, bert_model=None, pca=None, texts=None):
 
 def extract_volume(df):
     """Article count + source count per (ticker, date)."""
-    agg = df.groupby(["ticker", "date"]).agg({
+    agg = df.groupby(["ticker", "date"], dropna=False).agg({
         "headline": "count",
         "source": "nunique",
     }).reset_index()
