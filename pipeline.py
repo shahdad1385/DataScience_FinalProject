@@ -98,8 +98,14 @@ Examples:
 
     if args.mode == "full":
         from scripts.preprocessing.load_data import create_database
+        # All six feature builders must run. The three sentiment/social/event
+        # builders were previously omitted here, so a from-scratch `--mode full`
+        # rebuild left those columns NULL and the DB only ever had them because
+        # they had been run by hand.
         from scripts.preprocessing.feature_engineering import (
             add_stock_features, add_indicator_features, add_news_features,
+            add_sentiment_features, add_social_sentiment_features,
+            add_economic_event_features,
         )
         from scripts.preprocessing.preprocess import run_preprocessing
         print("=" * 60)
@@ -109,6 +115,9 @@ Examples:
         add_stock_features()
         add_indicator_features()
         add_news_features()
+        add_sentiment_features()
+        add_social_sentiment_features()
+        add_economic_event_features()
         run_preprocessing()
 
     if args.mode in ("train", "full"):
