@@ -13,52 +13,35 @@ from .classify import evaluate_classification
 
 
 def train_regressor(X_train, y_train, X_val=None, y_val=None,
-                    n_estimators=300, max_depth=5, learning_rate=0.05,
+                    n_estimators=40, max_depth=5, learning_rate=0.05,
                     early_stopping_rounds=20, verbose=False):
     """Train XGBoost regressor for OHLC prediction."""
-    params = {
-        "n_estimators": n_estimators,
-        "max_depth": max_depth,
-        "learning_rate": learning_rate,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "random_state": 42,
-        "n_jobs": -1,
-    }
-    model = xgb.XGBRegressor(**params)
-
-    eval_set = [(X_val, y_val)] if X_val is not None else None
-    model.fit(
-        X_train, y_train,
-        eval_set=eval_set,
-        verbose=verbose,
+    model = xgb.XGBRegressor(
+        n_estimators=n_estimators, max_depth=max_depth,
+        learning_rate=learning_rate, subsample=0.8,
+        colsample_bytree=0.8, random_state=42, n_jobs=-1,
     )
+    if X_val is not None:
+        model.fit(X_train, y_train, eval_set=[(X_val, y_val)])
+    else:
+        model.fit(X_train, y_train)
     return model
 
 
 def train_classifier(X_train, y_train, X_val=None, y_val=None,
-                     n_estimators=300, max_depth=5, learning_rate=0.05,
+                     n_estimators=40, max_depth=5, learning_rate=0.05,
                      early_stopping_rounds=20, verbose=False):
     """Train XGBoost classifier for direction prediction."""
-    params = {
-        "n_estimators": n_estimators,
-        "max_depth": max_depth,
-        "learning_rate": learning_rate,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "random_state": 42,
-        "n_jobs": -1,
-        "use_label_encoder": False,
-        "eval_metric": "logloss",
-    }
-    model = xgb.XGBClassifier(**params)
-
-    eval_set = [(X_val, y_val)] if X_val is not None else None
-    model.fit(
-        X_train, y_train,
-        eval_set=eval_set,
-        verbose=verbose,
+    model = xgb.XGBClassifier(
+        n_estimators=n_estimators, max_depth=max_depth,
+        learning_rate=learning_rate, subsample=0.8,
+        colsample_bytree=0.8, random_state=42, n_jobs=-1,
+        eval_metric="logloss",
     )
+    if X_val is not None:
+        model.fit(X_train, y_train, eval_set=[(X_val, y_val)])
+    else:
+        model.fit(X_train, y_train)
     return model
 
 
@@ -70,7 +53,13 @@ def predict_regressor(model, X):
 def predict_classifier(model, X):
     """Predict direction and probabilities."""
     y_pred = model.predict(X)
-    y_prob = model.predict_proba(X)[:, 1]  # probability of class 1 (up)
+    proba = model.predict_proba(X)
+    if proba.ndim == 3:
+        y_prob = proba[:, :, 1]
+    elif proba.ndim == 2 and proba.shape[1] == y_pred.shape[1]:
+        y_prob = proba
+    else:
+        y_prob = proba[:, 1]
     return y_pred, y_prob
 
 
