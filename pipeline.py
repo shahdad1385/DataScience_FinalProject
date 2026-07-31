@@ -33,6 +33,74 @@ from scripts.pipeline.train import train_all_models, evaluate_saved_models
 from scripts.pipeline.finetune import finetune_all
 from scripts.activations import ACTIVATION_CHOICES, DEFAULT_ACTIVATION
 from scripts.timeseries.train import DEFAULT_REG_LOSS
+from scripts.pipeline.data_assembly import HORIZON, SEQ_LEN
+
+
+def _patch_defaults(fn, **overrides):
+    """Rebind keyword defaults captured in a function signature.
+
+    Functions like `prepare_data(split, feature_cols=None, horizon=HORIZON)`
+    evaluate HORIZON once, at definition time. Rebinding the module constant
+    afterwards does not touch that captured default, so a --horizon override
+    would set da.HORIZON while prepare_data kept building 5-day targets. This
+    rewrites __defaults__ in place so the flag actually reaches the targets.
+    """
+    defaults = list(fn.__defaults__ or ())
+    if not defaults:
+        return
+    names = fn.__code__.co_varnames[:fn.__code__.co_argcount]
+    offset = len(names) - len(defaults)
+    for i, nm in enumerate(names[offset:]):
+        if nm in overrides:
+            defaults[i] = overrides[nm]
+    fn.__defaults__ = tuple(defaults)
+
+
+def _apply_data_overrides(horizon=None, seq_len=None):
+    """Propagate --horizon / --seq-len to every module that holds a copy.
+
+    data_assembly defines HORIZON and SEQ_LEN, but train.py, predict.py,
+    evaluate.py and finetune.py all do `from .data_assembly import SEQ_LEN`,
+    which binds the value at import time. Rebinding only the source module would
+    leave those copies stale, so the override is pushed to each holder, and to
+    the default arguments of every function that captured either constant.
+    """
+    from scripts.pipeline import data_assembly as da
+
+    horizon = int(horizon) if horizon else da.HORIZON
+    seq_len = int(seq_len) if seq_len else da.SEQ_LEN
+    if horizon < 1 or seq_len < 2:
+        raise SystemExit(f"Invalid --horizon {horizon} / --seq-len {seq_len}")
+
+    da.HORIZON = horizon
+    da.SEQ_LEN = seq_len
+
+    # Function defaults captured at definition time.
+    _patch_defaults(da.create_sequences, seq_len=seq_len)
+    _patch_defaults(da.create_sequences_with_context, seq_len=seq_len)
+    _patch_defaults(da.prepare_data, horizon=horizon)
+    _patch_defaults(da.add_targets, horizon=horizon)
+    _patch_defaults(da.dead_zone_for, horizon=horizon)
+
+    # Modules that imported the constants by value.
+    for mod_name in ("scripts.pipeline.train", "scripts.pipeline.predict",
+                     "scripts.pipeline.evaluate", "scripts.pipeline.finetune"):
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            continue
+        if hasattr(mod, "SEQ_LEN"):
+            mod.SEQ_LEN = seq_len
+        if hasattr(mod, "HORIZON"):
+            mod.HORIZON = horizon
+        for fn_name in ("evaluate_trading", "_actual_forward_returns"):
+            fn = getattr(mod, fn_name, None)
+            if callable(fn):
+                _patch_defaults(fn, horizon=horizon)
+
+    if (horizon, seq_len) != (HORIZON, SEQ_LEN):
+        print(f"Data config: horizon={horizon}d, lookback={seq_len}d "
+              f"(defaults {HORIZON}d / {SEQ_LEN}d)")
+    return horizon, seq_len
 
 
 def main():
@@ -83,6 +151,17 @@ Examples:
         help=f"Regression loss for sequence models (default: {DEFAULT_REG_LOSS}); "
              "huber is robust to the fat tails in daily returns",
     )
+    parser.add_argument(
+        "--horizon", type=int, default=HORIZON,
+        help=f"Forward trading days to predict (default: {HORIZON}). "
+             "1-day direction is near-random for NVDA (lag-1 autocorr -0.08); "
+             "5d has ~2.3x the signal-to-noise, 21d ~4.6x.",
+    )
+    parser.add_argument(
+        "--seq-len", type=int, default=SEQ_LEN,
+        help=f"Lookback window in trading days (default: {SEQ_LEN} ~= 3 months). "
+             "21 ~= 1 month, 63 ~= 3 months, 126 ~= 6 months.",
+    )
 
     # Evaluation flags
     parser.add_argument("--eval-detailed", action="store_true", help="Per-ticker & per-output metrics breakdown")
@@ -132,6 +211,11 @@ Examples:
         add_social_sentiment_features()
         add_economic_event_features()
         run_preprocessing()
+
+    # Apply horizon / lookback overrides before any data is assembled. These are
+    # module-level constants that data_assembly reads at call time, so setting
+    # them here propagates to train, finetune, predict and evaluate alike.
+    _apply_data_overrides(horizon=args.horizon, seq_len=args.seq_len)
 
     if args.mode in ("train", "full"):
         run_pipeline(
