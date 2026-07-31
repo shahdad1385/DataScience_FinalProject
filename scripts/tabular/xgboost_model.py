@@ -9,7 +9,7 @@ import numpy as np
 import xgboost as xgb
 
 from .regress import evaluate_regression
-from .classify import evaluate_classification
+from .classify import evaluate_classification, normalize_binary_outputs
 
 
 def train_regressor(X_train, y_train, X_val=None, y_val=None,
@@ -51,16 +51,16 @@ def predict_regressor(model, X):
 
 
 def predict_classifier(model, X):
-    """Predict direction and probabilities."""
+    """Predict direction and probabilities, always shaped (n_samples, n_outputs).
+
+    The previous shape logic read `y_pred.shape[1]`, which does not exist when
+    there is a single target: XGBoost then treats the task as plain binary
+    classification and returns a 1-D prediction array. That raised IndexError and
+    aborted training right after the classifier finished fitting.
+    """
     y_pred = model.predict(X)
     proba = model.predict_proba(X)
-    if proba.ndim == 3:
-        y_prob = proba[:, :, 1]
-    elif proba.ndim == 2 and proba.shape[1] == y_pred.shape[1]:
-        y_prob = proba
-    else:
-        y_prob = proba[:, 1]
-    return y_pred, y_prob
+    return normalize_binary_outputs(y_pred, proba)
 
 
 def evaluate_regressor(model, X_test, y_test):
