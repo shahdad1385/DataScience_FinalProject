@@ -9,7 +9,7 @@ import numpy as np
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 
 from .regress import evaluate_regression
-from .classify import evaluate_classification
+from .classify import evaluate_classification, normalize_binary_outputs
 
 
 def train_regressor(X_train, y_train, n_estimators=50, max_depth=8,
@@ -55,19 +55,10 @@ def predict_classifier(model, X):
     """
     y_pred = model.predict(X)
     proba = model.predict_proba(X)
-
-    if isinstance(proba, list):
-        cols = []
-        for p in proba:
-            p = np.asarray(p)
-            # Degenerate output (only one class seen in training)
-            cols.append(p[:, 1] if p.shape[1] > 1 else p[:, 0])
-        y_prob = np.column_stack(cols)
-    else:
-        proba = np.asarray(proba)
-        y_prob = proba[:, 1] if proba.shape[1] > 1 else proba[:, 0]
-
-    return y_pred, y_prob
+    # Shared normaliser: also collapses the single-target case, where predict()
+    # returns 1-D and predict_proba() returns (n, 2) class probabilities rather
+    # than one column per output.
+    return normalize_binary_outputs(y_pred, proba)
 
 
 
