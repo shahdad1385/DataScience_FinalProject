@@ -26,13 +26,23 @@ def train_regressor(X_train, y_train, n_estimators=50, max_depth=8,
     return model
 
 
-def train_classifier(X_train, y_train, n_estimators=50, max_depth=8,
-                     min_samples_split=5, random_state=42, n_jobs=-1):
-    """Train Random Forest classifier for direction prediction."""
+def train_classifier(X_train, y_train, n_estimators=400, max_depth=8,
+                     min_samples_split=20, min_samples_leaf=10, max_features="sqrt",
+                     class_weight="balanced_subsample", random_state=42, n_jobs=-1):
+    """Train Random Forest classifier for direction prediction.
+
+    More trees for a stable vote, heavier leaf/split floors so individual trees
+    cannot memorize noise on ~1,500 rows, sqrt feature sampling for the wide
+    feature space, and balanced_subsample weighting so up/down imbalance cannot
+    let the model coast on the majority class.
+    """
     model = RandomForestClassifier(
         n_estimators=n_estimators,
         max_depth=max_depth,
         min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf,
+        max_features=max_features,
+        class_weight=class_weight,
         random_state=random_state,
         n_jobs=n_jobs,
     )
