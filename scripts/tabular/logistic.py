@@ -72,6 +72,9 @@ def train(X_train, y_train, C=1.0, max_iter=1000, random_state=42, tol=1e-4,
             max_iter=max_iter,
             random_state=random_state,
             tol=tol,
+            # Balanced weighting keeps a rising period from being learned as
+            # always-up, which is what the unweighted classifier collapsed to.
+            class_weight="balanced",
             # After reduction the problem is well-conditioned and n > p, so
             # lbfgs converges quickly and reliably.
             solver="lbfgs",
