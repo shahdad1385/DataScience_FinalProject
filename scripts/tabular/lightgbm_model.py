@@ -65,8 +65,8 @@ def train_regressor(X_train, y_train, X_val=None, y_val=None,
 def train_classifier(X_train, y_train, X_val=None, y_val=None,
                      n_estimators=300, max_depth=3, learning_rate=0.03,
                      num_leaves=15, subsample=0.7, colsample_bytree=0.5,
-                     min_child_samples=30, reg_lambda=2.0, reg_alpha=0.5,
-                     early_stopping_rounds=40, verbose=-1):
+                     min_child_samples=30, reg_lambda=1.0, reg_alpha=0.2,
+                     min_gain_to_split=0.01, early_stopping_rounds=60, verbose=-1):
     """Train LightGBM classifier for direction prediction.
 
     Trains one model per target column (LightGBM doesn't support multi-output).
@@ -77,6 +77,14 @@ def train_classifier(X_train, y_train, X_val=None, y_val=None,
     model memorizes noise within the first few iterations. class_weight balances
     up/down days so the model cannot collapse to always-up (which the run showed
     scoring ~54% while learning nothing).
+
+    Calibration/sharpness: unlike RandomForest, LightGBM boosting output can sit
+    in a narrow probability band near 0.5 even with real signal, because each
+    round's logit update is shrunk (learning_rate) and leaf output is damped
+    (min_child_samples across the boosted votes); over-strong L1/L2 makes it
+    worse. Softened reg_lambda/reg_alpha, and `min_gain_to_split>0` forces each
+    split to clear a real loss-gain bar, so surviving rounds carry decisive
+    probability mass instead of hovering at the prior.
     """
     if not HAS_LIGHTGBM:
         raise ImportError("lightgbm not installed. Run: pip install lightgbm")
@@ -100,6 +108,7 @@ def train_classifier(X_train, y_train, X_val=None, y_val=None,
             "subsample": subsample,
             "colsample_bytree": colsample_bytree,
             "min_child_samples": min_child_samples,
+            "min_gain_to_split": min_gain_to_split,
             "reg_lambda": reg_lambda,
             "reg_alpha": reg_alpha,
             "class_weight": "balanced",
