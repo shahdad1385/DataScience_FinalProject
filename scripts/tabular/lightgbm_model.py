@@ -14,7 +14,7 @@ except ImportError:
     HAS_LIGHTGBM = False
 
 from .regress import evaluate_regression
-from .classify import evaluate_classification
+from .classify import evaluate_classification, normalize_binary_outputs
 
 
 def train_regressor(X_train, y_train, X_val=None, y_val=None,
@@ -118,19 +118,25 @@ def predict_regressor(model, X):
 
 
 def predict_classifier(model, X):
-    """Predict direction and probabilities. model is a list of per-column models."""
+    """Predict direction and probabilities, always shaped (n_samples, n_outputs).
+
+    LightGBM is trained as one model per target column, so the list branch
+    already produced 2-D output. The single-model branch did not, which would
+    break the [:, i] indexing every consumer relies on.
+    """
     if isinstance(model, list):
-        preds = []
-        probs = []
+        preds, probs = [], []
         for m in model:
-            p = m.predict(X)
-            pr = m.predict_proba(X)[:, 1]
-            preds.append(p.reshape(-1, 1))
-            probs.append(pr.reshape(-1, 1))
+            p = np.asarray(m.predict(X)).reshape(-1, 1)
+            pr = np.asarray(m.predict_proba(X))
+            pr = pr[:, [1]] if pr.ndim == 2 and pr.shape[1] > 1 else pr.reshape(-1, 1)
+            preds.append(p)
+            probs.append(pr)
         return np.hstack(preds).astype(int), np.hstack(probs)
+
     y_pred = model.predict(X)
-    y_prob = model.predict_proba(X)[:, 1]
-    return y_pred, y_prob
+    proba = model.predict_proba(X)
+    return normalize_binary_outputs(y_pred, proba)
 
 
 def evaluate_regressor(model, X_test, y_test):
