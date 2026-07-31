@@ -1,0 +1,2 @@
+model,total_return,annualized_return,annualized_volatility,sharpe_ratio,sortino_ratio,max_drawdown,calmar_ratio,hit_rate,profit_factor,up_capture,down_capture,n_days,n_tickers
+ts_transformer,0.25254389194074656,0.19402096089227028,0.23532808202309,0.6601542319424727,0.6439342727327149,-0.1628469553789466,1.1914312338629183,0.48125,1.2510199232140031,0.40319865081078904,0.4224638605196016,320,1

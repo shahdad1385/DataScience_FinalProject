@@ -1,0 +1,21 @@
+{
+  "timeseries": {
+    "best_model": "lstm",
+    "val_loss": 0.5185084044933319,
+    "weights_file": "timeseries_lstm.pt"
+  },
+  "tabular_regression": {
+    "best_model": "random_forest",
+    "rmse": 1.0406796253153945,
+    "weights_file": "tabular_random_forest_reg.pkl"
+  },
+  "tabular_classification": {
+    "best_model": "mlp",
+    "f1": 0.6267042706618196,
+    "weights_file": "tabular_mlp_cls/"
+  },
+  "features": {
+    "n_features": 407,
+    "feature_names_file": "feature_names.pkl"
+  }
+}

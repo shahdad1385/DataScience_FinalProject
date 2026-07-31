@@ -1,0 +1,2 @@
+model,total_return,annualized_return,annualized_volatility,sharpe_ratio,sortino_ratio,max_drawdown,calmar_ratio,hit_rate,profit_factor,up_capture,down_capture,n_days,n_tickers
+tab_lightgbm,1.072423880806579,0.775116611400742,0.2838562780581779,2.594441332937895,3.3242937680245106,-0.1605520567735348,4.827820824593155,0.546875,1.5748907659831681,0.6641996356152498,0.5528189422864582,320,1
