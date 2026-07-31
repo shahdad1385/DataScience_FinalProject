@@ -79,12 +79,19 @@ def run_clustering():
     print(f"\n  Clustering complete")
 
 
-def run_training():
+def run_training(activation=None, reg_loss=None, epochs=None, lr=None, patience=None):
     """Run full model training."""
     print("\n" + "=" * 60)
     print("STEP 4: MODEL TRAINING")
     print("=" * 60)
-    return train_all_models(verbose=True)
+    kwargs = {"verbose": True}
+    # Only forward what was explicitly provided so train_all_models keeps its
+    # own defaults otherwise.
+    for key, val in (("activation", activation), ("reg_loss", reg_loss),
+                     ("epochs", epochs), ("lr", lr), ("patience", patience)):
+        if val is not None:
+            kwargs[key] = val
+    return train_all_models(**kwargs)
 
 
 def run_prediction(results=None):
@@ -105,13 +112,17 @@ def run_prediction(results=None):
         save_predictions_to_db(predictions, df_test)
 
 
-def run_pipeline(skip_nlp=False, skip_clustering=False):
+def run_pipeline(skip_nlp=False, skip_clustering=False, activation=None,
+                 reg_loss=None, epochs=None, lr=None, patience=None):
     """
     Full pipeline execution.
 
     Args:
         skip_nlp: skip NLP feature extraction (use if already done)
         skip_clustering: skip clustering step (use if already done)
+        activation: activation for all neural models (default leaky_relu)
+        reg_loss: regression loss for sequence models (huber/mse/mae)
+        epochs / lr / patience: training overrides
     """
     start = time.time()
 
@@ -138,7 +149,8 @@ def run_pipeline(skip_nlp=False, skip_clustering=False):
         print("\nSkipping Clustering (skip_clustering=True)")
 
     # Step 3: Training
-    results = run_training()
+    results = run_training(activation=activation, reg_loss=reg_loss,
+                           epochs=epochs, lr=lr, patience=patience)
 
     # Step 4: Prediction
     run_prediction(results)
