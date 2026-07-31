@@ -159,6 +159,15 @@ def save_confusion_matrices(model_key, y_true, y_pred, ticker_names):
         print(f"    No predictions for confusion matrix")
         return
 
+    # Single-target classifiers can emit 1-D arrays; coerce to (n, n_tickers)
+    # so the [:, i] indexing below is safe.
+    y_true = np.asarray(y_true)
+    if y_true.ndim == 1:
+        y_true = y_true.reshape(-1, 1)
+    y_pred = np.asarray(y_pred)
+    if y_pred.ndim == 1:
+        y_pred = y_pred.reshape(-1, 1)
+
     for i, ticker in enumerate(ticker_names):
         y_t = y_true[:, i]
         y_p = (y_pred[:, i] > 0.5).astype(int)
