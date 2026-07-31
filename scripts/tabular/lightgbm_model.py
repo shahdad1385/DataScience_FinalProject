@@ -63,12 +63,20 @@ def train_regressor(X_train, y_train, X_val=None, y_val=None,
 
 
 def train_classifier(X_train, y_train, X_val=None, y_val=None,
-                     n_estimators=100, max_depth=5, learning_rate=0.05,
-                     num_leaves=31, early_stopping_rounds=20, verbose=-1):
+                     n_estimators=300, max_depth=3, learning_rate=0.03,
+                     num_leaves=15, subsample=0.7, colsample_bytree=0.5,
+                     min_child_samples=30, reg_lambda=2.0, reg_alpha=0.5,
+                     early_stopping_rounds=40, verbose=-1):
     """Train LightGBM classifier for direction prediction.
 
     Trains one model per target column (LightGBM doesn't support multi-output).
     Returns a list of models (one per column).
+
+    Defaults are regularized for ~1,500 noisy rows: shallow trees, fewer leaves,
+    heavier min_child_samples, row+column subsampling, and L1/L2, otherwise the
+    model memorizes noise within the first few iterations. class_weight balances
+    up/down days so the model cannot collapse to always-up (which the run showed
+    scoring ~54% while learning nothing).
     """
     if not HAS_LIGHTGBM:
         raise ImportError("lightgbm not installed. Run: pip install lightgbm")
@@ -89,8 +97,12 @@ def train_classifier(X_train, y_train, X_val=None, y_val=None,
             "max_depth": max_depth,
             "learning_rate": learning_rate,
             "num_leaves": num_leaves,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
+            "subsample": subsample,
+            "colsample_bytree": colsample_bytree,
+            "min_child_samples": min_child_samples,
+            "reg_lambda": reg_lambda,
+            "reg_alpha": reg_alpha,
+            "class_weight": "balanced",
             "random_state": 42,
             "n_jobs": -1,
             "verbose": verbose,
