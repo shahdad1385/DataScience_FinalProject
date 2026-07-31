@@ -565,7 +565,8 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 elif os.path.exists(mlp_path):
                     from ..tabular.mlp import predict_regressor, load_model as load_mlp_model
                     model = load_mlp_model(f"tabular_{model_name}_reg")
-                    saved_n = getattr(model, "input_size", None)
+                    cfg = getattr(model, "build_config", None) or {}
+                    saved_n = cfg.get("input_size") or getattr(model, "input_size", None)
                     if saved_n is not None and saved_n != X_te_flat.shape[1]:
                         print(f"  Skipping {model_name} (reg): input_size mismatch "
                               f"(saved {saved_n} vs data {X_te_flat.shape[1]})")
@@ -613,7 +614,8 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 elif os.path.exists(cls_mlp_path):
                     from ..tabular.mlp import predict_classifier, load_model as load_mlp_model
                     cls_model = load_mlp_model(f"tabular_{model_name}_cls")
-                    saved_n = getattr(cls_model, "input_size", None)
+                    cfg = getattr(cls_model, "build_config", None) or {}
+                    saved_n = cfg.get("input_size") or getattr(cls_model, "input_size", None)
                     if saved_n is not None and saved_n != X_te_flat.shape[1]:
                         print(f"  Skipping {model_name} (cls): input_size mismatch "
                               f"(saved {saved_n} vs data {X_te_flat.shape[1]})")

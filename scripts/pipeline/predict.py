@@ -22,8 +22,13 @@ from .data_assembly import (
 OHLC = ["open", "high", "low", "close"]
 
 
-def load_models():
-    """Load all trained models from disk."""
+def load_models(n_features=None):
+    """Load all trained models from disk.
+
+    Args:
+        n_features: if provided, skip models whose saved input dimension
+            doesn't match this count (stale weights from a different schema).
+    """
     models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
 
     models = {}
@@ -41,10 +46,19 @@ def load_models():
                       ("bilstm", bilstm), ("tcn", tcn)]:
         path = os.path.join(models_dir, f"timeseries_{name}.pt")
         if os.path.exists(path):
-            models[f"ts_{name}"] = load_ts_model(
+            model = load_ts_model(
                 mod.create_model, f"timeseries_{name}",
                 default_kwargs={"n_tickers": len(TICKERS)},
             )
+            if n_features is not None:
+                saved_n = None
+                for p in model.parameters():
+                    saved_n = p.shape[-1]
+                    break
+                if saved_n is not None and saved_n != n_features:
+                    print(f"  Skipping ts_{name}: input_size mismatch ({saved_n} vs {n_features})")
+                    continue
+            models[f"ts_{name}"] = model
 
     # Tabular
     for name in ["xgboost", "random_forest", "lightgbm"]:
@@ -52,7 +66,13 @@ def load_models():
             path = os.path.join(models_dir, f"tabular_{name}_{task}.pkl")
             if os.path.exists(path):
                 with open(path, "rb") as f:
-                    models[f"tab_{name}_{task}"] = pickle.load(f)
+                    m = pickle.load(f)
+                if n_features is not None:
+                    saved_n = getattr(m, "n_features_in_", None)
+                    if saved_n is not None and saved_n != n_features:
+                        print(f"  Skipping tab_{name}_{task}: input_size mismatch ({saved_n} vs {n_features})")
+                        continue
+                models[f"tab_{name}_{task}"] = m
 
     # MLP.
     #
@@ -64,7 +84,14 @@ def load_models():
     for task in ["reg", "cls"]:
         path = os.path.join(models_dir, f"tabular_mlp_{task}.pt")
         if os.path.exists(path):
-            models[f"tab_mlp_{task}"] = mlp.load_model(f"tabular_mlp_{task}")
+            m = mlp.load_model(f"tabular_mlp_{task}")
+            if n_features is not None:
+                cfg = getattr(m, "build_config", None) or {}
+                saved_n = cfg.get("input_size") or getattr(m, "input_size", None)
+                if saved_n is not None and saved_n != n_features:
+                    print(f"  Skipping tab_mlp_{task}: input_size mismatch ({saved_n} vs {n_features})")
+                    continue
+            models[f"tab_mlp_{task}"] = m
 
     # Ridge / Logistic
     for name, task in [("ridge", "reg"), ("logistic", "cls")]:

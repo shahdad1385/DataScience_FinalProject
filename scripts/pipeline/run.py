@@ -99,7 +99,13 @@ def run_prediction(results=None):
     print("\n" + "=" * 60)
     print("STEP 5: PREDICTION")
     print("=" * 60)
-    models = load_models()
+
+    # Determine feature count so load_models can skip stale weights.
+    from .data_assembly import prepare_data
+    _, _, _, feature_names, _ = prepare_data("train")
+    n_features = len(feature_names) if feature_names else None
+
+    models = load_models(n_features=n_features)
     if not models:
         print("  No models found, skipping prediction")
         return
