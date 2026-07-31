@@ -66,7 +66,22 @@ def evaluate_per_ticker(y_true, y_pred, y_prob=None, ticker_names=None):
     Evaluate classification per ticker.
     y_true, y_pred: shape (n_samples, n_tickers)
     Returns dict with metrics for each ticker.
+
+    Single-target (n_tickers == 1) inputs legitimately arrive 1-D from some
+    classifiers; coerce everything to 2-D so the [:, i] indexing below never
+    sees a 1-dimensional array (that was the IndexError on random_forest).
     """
+    y_true = np.asarray(y_true)
+    if y_true.ndim == 1:
+        y_true = y_true.reshape(-1, 1)
+    y_pred = np.asarray(y_pred)
+    if y_pred.ndim == 1:
+        y_pred = y_pred.reshape(-1, 1)
+    if y_prob is not None:
+        y_prob = np.asarray(y_prob)
+        if y_prob.ndim == 1:
+            y_prob = y_prob.reshape(-1, 1)
+
     n_tickers = y_true.shape[1]
     if ticker_names is None:
         ticker_names = [f"ticker_{i}" for i in range(n_tickers)]
