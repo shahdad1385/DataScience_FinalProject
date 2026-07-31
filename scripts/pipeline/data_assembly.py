@@ -714,7 +714,12 @@ def load_target_scaler():
 def apply_target_scaler(y_reg, scaler):
     if scaler is None or y_reg is None:
         return y_reg
-    out = scaler.transform(np.asarray(y_reg, dtype=np.float64))
+    y = np.asarray(y_reg, dtype=np.float64)
+    if hasattr(scaler, "n_features_in_") and scaler.n_features_in_ != y.shape[1]:
+        print(f"  WARNING: target scaler expects {scaler.n_features_in_} targets "
+              f"but data has {y.shape[1]} — skipping scaling (scaler is stale)")
+        return y.astype(np.float32)
+    out = scaler.transform(y)
     return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 
@@ -726,7 +731,10 @@ def inverse_target_scale(y_scaled, scaler=None):
         scaler = load_target_scaler()
     if scaler is None:
         return np.asarray(y_scaled, dtype=float)
-    return scaler.inverse_transform(np.asarray(y_scaled, dtype=np.float64))
+    y = np.asarray(y_scaled, dtype=np.float64)
+    if hasattr(scaler, "n_features_in_") and scaler.n_features_in_ != y.shape[1]:
+        return y
+    return scaler.inverse_transform(y)
 
 
 def fit_feature_scaler(X):
@@ -758,7 +766,12 @@ def apply_feature_scaler(X, scaler):
     """Apply the train-fitted scaler; returns float32 for torch."""
     if scaler is None or X is None:
         return X
-    Xs = scaler.transform(np.asarray(X, dtype=np.float64))
+    X = np.asarray(X, dtype=np.float64)
+    if hasattr(scaler, "n_features_in_") and scaler.n_features_in_ != X.shape[1]:
+        print(f"  WARNING: feature scaler expects {scaler.n_features_in_} features "
+              f"but data has {X.shape[1]} — skipping scaling (scaler is stale)")
+        return X.astype(np.float32)
+    Xs = scaler.transform(X)
     return np.nan_to_num(Xs, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 
