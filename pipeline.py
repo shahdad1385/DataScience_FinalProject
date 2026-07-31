@@ -31,6 +31,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from scripts.pipeline.run import run_pipeline
 from scripts.pipeline.train import train_all_models, evaluate_saved_models
 from scripts.pipeline.finetune import finetune_all
+from scripts.activations import ACTIVATION_CHOICES, DEFAULT_ACTIVATION
+from scripts.timeseries.train import DEFAULT_REG_LOSS
 
 
 def main():
@@ -70,6 +72,17 @@ Examples:
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--patience", type=int, default=30, help="Early stopping patience")
     parser.add_argument("--verbose", action="store_true", default=True, help="Verbose output")
+    parser.add_argument(
+        "--activation", type=str, default=DEFAULT_ACTIVATION,
+        choices=ACTIVATION_CHOICES,
+        help=f"Activation for all neural models (default: {DEFAULT_ACTIVATION})",
+    )
+    parser.add_argument(
+        "--reg-loss", type=str, default=DEFAULT_REG_LOSS,
+        choices=["huber", "mse", "mae"],
+        help=f"Regression loss for sequence models (default: {DEFAULT_REG_LOSS}); "
+             "huber is robust to the fat tails in daily returns",
+    )
 
     # Evaluation flags
     parser.add_argument("--eval-detailed", action="store_true", help="Per-ticker & per-output metrics breakdown")
@@ -121,7 +134,11 @@ Examples:
         run_preprocessing()
 
     if args.mode in ("train", "full"):
-        run_pipeline(skip_nlp=args.skip_nlp, skip_clustering=args.skip_clustering)
+        run_pipeline(
+            skip_nlp=args.skip_nlp, skip_clustering=args.skip_clustering,
+            activation=args.activation, reg_loss=args.reg_loss,
+            epochs=args.epochs, lr=args.lr, patience=args.patience,
+        )
         evaluate_saved_models(model_filter=args.model, eval_flags=eval_flags)
 
     elif args.mode == "finetune":
