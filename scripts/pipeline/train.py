@@ -160,9 +160,9 @@ def train_all_models(verbose=True, model_filter=None, epochs=200, lr=1e-3,
                 model_epochs = hp.get("epochs", epochs)
                 model_patience = hp.get("patience", patience)
                 model_batch_size = hp.get("batch_size", 64)
-                model_hidden = hp.get("hidden_size", 64)
-                model_n_layers = hp.get("n_layers", 2)
-                model_dropout = hp.get("dropout", 0.2)
+                model_hidden = hp.get("hidden_size", 32)
+                model_n_layers = hp.get("n_layers", 1)
+                model_dropout = hp.get("dropout", 0.4)
 
                 print(f"\n  Training {model_name.upper()} (lr={model_lr:.2e}, hidden={model_hidden}, "
                       f"layers={model_n_layers}, act={activation}, reg_loss={reg_loss})")
