@@ -529,7 +529,7 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
 
                 from ..tabular import pipe as tab_pipe
                 from ..tabular.regress import evaluate_regression
-                from ..tabular.classify import evaluate_classification
+                from ..tabular.classify import evaluate_classification, normalize_binary_outputs
 
                 # Load and evaluate regression
                 if os.path.exists(pkl_path):
@@ -567,8 +567,18 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                         from ..tabular.lightgbm_model import predict_classifier as lgb_predict
                         pred_cls, prob_cls = lgb_predict(cls_model, X_te_flat)
                     elif model_name in ("xgboost", "random_forest"):
-                        pred_cls = cls_model.predict(X_te_flat)
-                        prob_cls = cls_model.predict_proba(X_te_flat)
+                        # Force (n_samples, n_tickers) shape. For a single-target
+                        # (n,1) label, scikit-learn collapses to binary: predict()
+                        # returns 1-D (n,) and predict_proba() returns (n,2) CLASS
+                        # columns [P(down), P(up)]. Passing those through left the
+                        # detailed per-ticker loop indexing [:, i] on a 1-D array,
+                        # which is the IndexError that aborted evaluation on
+                        # random_forest. normalize_binary_outputs reshapes to 2-D
+                        # and keeps only P(up) per output.
+                        raw_pred = cls_model.predict(X_te_flat)
+                        raw_prob = cls_model.predict_proba(X_te_flat)
+                        pred_cls, prob_cls = normalize_binary_outputs(
+                            raw_pred, raw_prob, n_outputs=len(TICKERS))
                     elif model_name == "logistic":
                         # Shaped from y_cls_te (sequence-aligned), not y_cls_test,
                         # so the per-ticker columns line up with X_te_flat rows.
