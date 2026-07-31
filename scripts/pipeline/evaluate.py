@@ -17,7 +17,7 @@ except ImportError:
 from sklearn.inspection import permutation_importance
 import mlflow
 
-from .data_assembly import TICKERS, SEQ_LEN
+from .data_assembly import TICKERS, SEQ_LEN, REF_CLOSE_SUFFIX
 
 # Must match every other module (scripts/models). This file previously applied
 # dirname three times instead of two, resolving to CAF/models, so evaluation
@@ -54,11 +54,13 @@ def run_detailed_evaluation(results, X_test, y_reg_test, y_cls_test,
             reg_metrics = model_res["regression"]
             cls_metrics = model_res["classification"]
 
-        if "model" in model_res:
-            model = model_res["model"]
-            reg_pred = model_res.get("reg_pred")
-            cls_pred = model_res.get("cls_pred")
-            cls_prob = model_res.get("cls_prob")
+        # Read the prediction arrays unconditionally. These were previously only
+        # read inside `if "model" in model_res`, but evaluate mode rebuilds models
+        # locally and never stores a "model" key, so reg_pred/cls_pred stayed None
+        # and every stage reported "No predictions for ..." and saved no plots.
+        reg_pred = model_res.get("reg_pred")
+        cls_pred = model_res.get("cls_pred")
+        cls_prob = model_res.get("cls_prob")
 
         if eval_flags.get("detailed"):
             evaluate_detailed(
@@ -191,25 +193,62 @@ def save_confusion_matrices(model_key, y_true, y_pred, ticker_names):
     print(f"    Saved {len(ticker_names)} confusion matrices to {CONFUSION_DIR}")
 
 
+def _actual_next_day_returns(df_test, ticker_names):
+    """Realised next-day return per ticker, taken from the joint frame.
+
+    Each ticker's today-close lives in {TICKER}_refclose, so the realised
+    next-day return is refclose.shift(-1) / refclose - 1. The final row has no
+    next day and is returned as NaN, then filtered by the caller.
+    """
+    if df_test is None or "date" not in getattr(df_test, "columns", []):
+        return {}
+
+    out = {}
+    ordered = df_test.sort_values("date")
+    for ticker in ticker_names:
+        col = f"{ticker}_{REF_CLOSE_SUFFIX}"
+        if col not in ordered.columns:
+            continue
+        ref = pd.to_numeric(ordered[col], errors="coerce")
+        ref = ref.where(ref > 0)
+        out[ticker] = (ref.shift(-1) / ref - 1.0).values
+    return out
+
+
 def evaluate_trading(model_key, y_true, y_pred, df_test, ticker_names):
     """Trading simulation: long-only on predicted direction."""
     if y_pred is None:
         print(f"    No predictions for trading evaluation")
         return
 
-    prices = df_test[["date", "ticker", "close"]].copy()
-    prices["date"] = pd.to_datetime(prices["date"])
+    # df_test is the JOINT frame: one row per date, with each ticker's reference
+    # close in its own {TICKER}_refclose column. The previous code indexed
+    # ["date", "ticker", "close"], which only exists in the pre-pivot long
+    # format, so trading evaluation raised KeyError and was silently skipped.
+    actual_by_ticker = _actual_next_day_returns(df_test, ticker_names)
+    if not actual_by_ticker:
+        print("    No reference prices in df_test for trading evaluation")
+        return
 
     returns_list = []
     for i, ticker in enumerate(ticker_names):
-        ticker_prices = prices[prices["ticker"] == ticker].sort_values("date")
-        if len(ticker_prices) < 2:
+        actual_returns = actual_by_ticker.get(ticker)
+        if actual_returns is None or len(actual_returns) < 2:
             continue
 
-        actual_returns = ticker_prices["close"].pct_change().shift(-1).dropna().values
-        preds = y_pred[:len(actual_returns), i]
-        signals = (preds > 0.5).astype(int)
+        # Align predictions with realised returns and drop the trailing row,
+        # whose next-day return is unknown.
+        n = min(len(actual_returns), len(y_pred))
+        actual_returns = np.asarray(actual_returns[:n], dtype=float)
+        preds = np.asarray(y_pred[:n, i], dtype=float)
+        keep = np.isfinite(actual_returns) & np.isfinite(preds)
+        actual_returns = actual_returns[keep]
+        preds = preds[keep]
+        if len(actual_returns) < 2:
+            continue
 
+        # Works for both probabilities and hard 0/1 labels.
+        signals = (preds > 0.5).astype(int)
         strategy_returns = signals * actual_returns
 
         returns_list.append({
@@ -399,13 +438,26 @@ def plot_calibration_curves(model_key, y_true, y_prob, ticker_names):
 def save_predictions(model_key, y_reg_true, y_cls_true,
                      reg_pred, cls_pred, cls_prob,
                      df_test, reg_output_names, cls_output_names):
-    """Save raw predictions + probabilities to CSV."""
-    dates = df_test["date"].values
-    tickers = df_test["ticker"].values
+    """Save raw predictions + probabilities to CSV.
+
+    df_test is the JOINT frame: one row per date, carrying every ticker's columns.
+    There is no single "ticker" column to read — indexing df_test["ticker"] here
+    raised KeyError and the CSV was never written. Each row therefore covers all
+    tickers, with the ticker encoded in the per-output column names.
+    """
+    n_rows = min(
+        len(df_test) if df_test is not None else 0,
+        len(y_reg_true) if y_reg_true is not None else 0,
+    ) or (len(y_reg_true) if y_reg_true is not None else 0)
+
+    if df_test is not None and "date" in df_test.columns:
+        dates = pd.to_datetime(df_test.sort_values("date")["date"]).values[:n_rows]
+    else:
+        dates = np.arange(n_rows)
 
     pred_rows = []
-    for i in range(len(dates)):
-        row = {"date": dates[i], "ticker": tickers[i]}
+    for i in range(n_rows):
+        row = {"date": dates[i] if i < len(dates) else None}
         for j, name in enumerate(reg_output_names):
             row[f"true_{name}"] = y_reg_true[i, j] if i < len(y_reg_true) else np.nan
             row[f"pred_{name}"] = reg_pred[i, j] if reg_pred is not None and i < len(reg_pred) else np.nan
