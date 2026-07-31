@@ -18,8 +18,14 @@ from . import logistic
 from . import ridge
 from .regress import evaluate_regression, evaluate_per_output
 from .classify import evaluate_classification, evaluate_per_ticker, confidence_from_probs
+from ..activations import DEFAULT_ACTIVATION
 
-TICKERS = ["NVDA", "GOOGL", "AVGO", "AMD", "TSM"]
+# Prediction targets. Single-target now: the model predicts NVDA only, so the
+# regression head is 4 outputs (OHLC returns) and the classification head is 1.
+# Peer companies still contribute through the sector aggregates built in
+# data_assembly, they are just not predicted here.
+from ..pipeline.data_assembly import TICKERS
+
 OHLC_COLS = ["open", "high", "low", "close"]
 
 
@@ -34,7 +40,8 @@ def get_ohlc_output_names(n_tickers=5):
 
 def train_all_regression(X_train, y_reg_train, X_val, y_reg_val,
                          feature_names=None, verbose=False,
-                         model_filter=None, hyperparams=None):
+                         model_filter=None, hyperparams=None,
+                         activation=DEFAULT_ACTIVATION):
     """
     Train all regression models and compare.
     y_reg_train/val: shape (n_samples, n_tickers * 4) — OHLC for each ticker.
@@ -88,6 +95,7 @@ def train_all_regression(X_train, y_reg_train, X_val, y_reg_val,
     if "mlp" in models_to_train:
         hp = hyperparams.get("tab_reg_mlp", {})
         print(f"  MLP Regression (params: {hp})")
+        hp.setdefault("activation", activation)
         mlp_reg = mlp.train_regressor(X_train, y_reg_train, X_val, y_reg_val, verbose=verbose, **hp)
         mlp_pred = mlp.predict_regressor(mlp_reg, X_val)
         mlp_metrics = evaluate_per_output(y_reg_val, mlp_pred, output_names)
@@ -115,7 +123,8 @@ def train_all_regression(X_train, y_reg_train, X_val, y_reg_val,
 
 def train_all_classification(X_train, y_cls_train, X_val, y_cls_val,
                              feature_names=None, verbose=False,
-                             model_filter=None, hyperparams=None):
+                             model_filter=None, hyperparams=None,
+                             activation=DEFAULT_ACTIVATION):
     """
     Train all classification models and compare.
     y_cls_train/val: shape (n_samples, n_tickers) — direction for each ticker.
@@ -167,6 +176,7 @@ def train_all_classification(X_train, y_cls_train, X_val, y_cls_val,
     if "mlp" in models_to_train:
         hp = hyperparams.get("tab_cls_mlp", {})
         print(f"  MLP Classification (params: {hp})")
+        hp.setdefault("activation", activation)
         mlp_cls = mlp.train_classifier(X_train, y_cls_train, X_val, y_cls_val, verbose=verbose, **hp)
         mlp_pred, mlp_prob = mlp.predict_classifier(mlp_cls, X_val)
         mlp_metrics = evaluate_per_ticker(y_cls_val, mlp_pred, mlp_prob, TICKERS[:n_tickers])
