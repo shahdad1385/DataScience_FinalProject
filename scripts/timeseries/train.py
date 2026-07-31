@@ -154,9 +154,12 @@ def validate(model, loader, device, loss_kwargs=None):
 
 
 
+DEFAULT_WEIGHT_DECAY = 1e-2
+
+
 def train_model(model, train_loader, val_loader, lr=1e-3, epochs=200,
                 patience=30, device=None, use_amp=True, verbose=True,
-                loss_kwargs=None):
+                loss_kwargs=None, weight_decay=DEFAULT_WEIGHT_DECAY):
     """
     Full training loop with early stopping.
 
@@ -171,6 +174,7 @@ def train_model(model, train_loader, val_loader, lr=1e-3, epochs=200,
         use_amp: use mixed precision on GPU
         verbose: print progress
         loss_kwargs: forwarded to combined_loss (reg loss kind, pos_weight, ...)
+        weight_decay: AdamW L2 penalty
 
     Returns:
         best_model, history dict
@@ -180,7 +184,12 @@ def train_model(model, train_loader, val_loader, lr=1e-3, epochs=200,
     model = model.to(device)
     loss_kwargs = loss_kwargs or {}
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    # weight_decay is deliberately strong. With ~1,400 training sequences, 400+
+    # features per timestep and a genuinely weak signal, every model in the
+    # previous run reached its best validation loss at epoch 0 and then diverged
+    # while train loss fell to ~0.1 — textbook memorisation. 1e-4 was far too
+    # permissive for this sample size.
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     # Track the same objective used for early stopping.
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 

@@ -20,6 +20,7 @@ from . import prophet_model
 from .train import (
     get_device, train_model, save_model, load_model, predict as ts_predict,
     compute_pos_weight, DEFAULT_REG_LOSS, DEFAULT_HUBER_DELTA,
+    DEFAULT_WEIGHT_DECAY,
 )
 from .data import create_dataloaders
 from ..activations import DEFAULT_ACTIVATION
@@ -47,8 +48,9 @@ def train_all(X_train, y_reg_train, y_cls_train,
               X_val, y_reg_val, y_cls_val,
               seq_len=30, batch_size=64, lr=1e-3, epochs=200,
               patience=30, n_tickers=5, tickers=None, verbose=True,
-              activation=DEFAULT_ACTIVATION, hidden_size=64, n_layers=2,
-              dropout=0.2, loss_kwargs=None):
+              activation=DEFAULT_ACTIVATION, hidden_size=32, n_layers=1,
+              dropout=0.4, loss_kwargs=None,
+              weight_decay=DEFAULT_WEIGHT_DECAY):
     """
     Train all time series models and compare.
 
@@ -89,6 +91,7 @@ def train_all(X_train, y_reg_train, y_cls_train,
             model, train_loader, val_loader,
             lr=lr, epochs=epochs, patience=patience,
             device=device, verbose=verbose, loss_kwargs=loss_kwargs,
+            weight_decay=weight_decay,
         )
         val_loss, val_preds = _validate(model, val_loader, device, loss_kwargs=loss_kwargs)
         results[name] = {"model": model, "history": hist, "val_loss": val_loss, "val_preds": val_preds}
@@ -165,9 +168,10 @@ def build_kwargs(model_name, hidden_size, n_layers, dropout, n_tickers,
 def train_single(model_name, X_train, y_reg_train, y_cls_train,
                  X_val, y_reg_val, y_cls_val,
                  seq_len=30, n_tickers=5, lr=1e-3, epochs=200,
-                 patience=30, batch_size=64, hidden_size=64,
-                 n_layers=2, dropout=0.2, verbose=True,
-                 activation=DEFAULT_ACTIVATION, loss_kwargs=None):
+                 patience=30, batch_size=64, hidden_size=32,
+                 n_layers=1, dropout=0.4, verbose=True,
+                 activation=DEFAULT_ACTIVATION, loss_kwargs=None,
+                 weight_decay=DEFAULT_WEIGHT_DECAY):
     """
     Train a single time series model with custom hyperparameters.
 
@@ -202,13 +206,14 @@ def train_single(model_name, X_train, y_reg_train, y_cls_train,
         print(f"\n{'='*40}")
         print(f"  Training {model_name.upper()}")
         print(f"  hidden={hidden_size}, layers={n_layers}, dropout={dropout}, "
-              f"lr={lr:.2e}, act={activation}")
+              f"lr={lr:.2e}, act={activation}, wd={weight_decay:g}")
         print(f"{'='*40}")
 
     model, hist = train_model(
         model, train_loader, val_loader,
         lr=lr, epochs=epochs, patience=patience,
         device=device, verbose=verbose, loss_kwargs=loss_kwargs,
+        weight_decay=weight_decay,
     )
 
     val_loss, val_preds = _validate(model, val_loader, device, loss_kwargs=loss_kwargs)
