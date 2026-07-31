@@ -20,7 +20,15 @@ from . import hierarchical
 from .compare import evaluate, compare
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
-TICKERS = ["NVDA", "GOOGL", "AVGO", "AMD", "TSM"]
+
+# Clustering runs over the whole sector's news, matching nlp.extract. The old
+# five-name list also excluded the industry sentinel, so a split made up of
+# industry-wide articles (val: 40 of 40) produced "No keyword data for
+# clustering" and contributed no cluster features at all.
+from ..nlp.extract import TICKERS as _NEWS_TICKERS
+from ..nlp.features import INDUSTRY_TICKER
+
+TICKERS = list(_NEWS_TICKERS) + [INDUSTRY_TICKER]
 
 
 def cluster_keyword_vectors(keyword_vectors, keyword_names, n_clusters=8):
