@@ -17,7 +17,7 @@ except ImportError:
 from sklearn.inspection import permutation_importance
 import mlflow
 
-from .data_assembly import TICKERS, SEQ_LEN, REF_CLOSE_SUFFIX
+from .data_assembly import TICKERS, SEQ_LEN, REF_CLOSE_SUFFIX, HORIZON
 
 # Must match every other module (scripts/models). This file previously applied
 # dirname three times instead of two, resolving to CAF/models, so evaluation
@@ -202,16 +202,22 @@ def save_confusion_matrices(model_key, y_true, y_pred, ticker_names):
     print(f"    Saved {len(ticker_names)} confusion matrices to {CONFUSION_DIR}")
 
 
-def _actual_next_day_returns(df_test, ticker_names):
-    """Realised next-day return per ticker, taken from the joint frame.
+def _actual_forward_returns(df_test, ticker_names, horizon=HORIZON):
+    """Realised `horizon`-day forward return per ticker, from the joint frame.
 
     Each ticker's today-close lives in {TICKER}_refclose, so the realised
-    next-day return is refclose.shift(-1) / refclose - 1. The final row has no
-    next day and is returned as NaN, then filtered by the caller.
+    forward return is refclose.shift(-horizon) / refclose - 1. The final
+    `horizon` rows have no forward price and are returned as NaN, then filtered
+    by the caller.
+
+    This must use the same horizon as the training targets. When the model
+    predicts a 5-day move but the simulation credits it with a 1-day return, the
+    reported Sharpe describes a strategy nobody trained.
     """
     if df_test is None or "date" not in getattr(df_test, "columns", []):
         return {}
 
+    horizon = int(max(int(horizon), 1))
     out = {}
     ordered = df_test.sort_values("date")
     for ticker in ticker_names:
@@ -220,21 +226,26 @@ def _actual_next_day_returns(df_test, ticker_names):
             continue
         ref = pd.to_numeric(ordered[col], errors="coerce")
         ref = ref.where(ref > 0)
-        out[ticker] = (ref.shift(-1) / ref - 1.0).values
+        out[ticker] = (ref.shift(-horizon) / ref - 1.0).values
     return out
 
 
-def evaluate_trading(model_key, y_true, y_pred, df_test, ticker_names):
-    """Trading simulation: long-only on predicted direction."""
+def evaluate_trading(model_key, y_true, y_pred, df_test, ticker_names, horizon=HORIZON):
+    """Trading simulation: long-only on predicted direction.
+
+    Positions are held for `horizon` days, matching the prediction target.
+    """
     if y_pred is None:
         print(f"    No predictions for trading evaluation")
         return
+
+    horizon = int(max(int(horizon), 1))
 
     # df_test is the JOINT frame: one row per date, with each ticker's reference
     # close in its own {TICKER}_refclose column. The previous code indexed
     # ["date", "ticker", "close"], which only exists in the pre-pivot long
     # format, so trading evaluation raised KeyError and was silently skipped.
-    actual_by_ticker = _actual_next_day_returns(df_test, ticker_names)
+    actual_by_ticker = _actual_forward_returns(df_test, ticker_names, horizon=horizon)
     if not actual_by_ticker:
         print("    No reference prices in df_test for trading evaluation")
         return
@@ -245,8 +256,8 @@ def evaluate_trading(model_key, y_true, y_pred, df_test, ticker_names):
         if actual_returns is None or len(actual_returns) < 2:
             continue
 
-        # Align predictions with realised returns and drop the trailing row,
-        # whose next-day return is unknown.
+        # Align predictions with realised returns and drop trailing rows whose
+        # forward return is unknown.
         n = min(len(actual_returns), len(y_pred))
         actual_returns = np.asarray(actual_returns[:n], dtype=float)
         preds = np.asarray(y_pred[:n, i], dtype=float)
@@ -255,6 +266,14 @@ def evaluate_trading(model_key, y_true, y_pred, df_test, ticker_names):
         preds = preds[keep]
         if len(actual_returns) < 2:
             continue
+
+        # Overlapping windows: consecutive rows share horizon-1 days, so taking
+        # every row would count the same price move up to `horizon` times and
+        # inflate the return series. Stepping by `horizon` gives non-overlapping,
+        # independently realisable trades.
+        if horizon > 1:
+            actual_returns = actual_returns[::horizon]
+            preds = preds[::horizon]
 
         # Works for both probabilities and hard 0/1 labels.
         signals = (preds > 0.5).astype(int)
@@ -271,30 +290,37 @@ def evaluate_trading(model_key, y_true, y_pred, df_test, ticker_names):
         print(f"    Insufficient data for trading simulation")
         return
 
-    n_days = min(len(r["strategy_returns"]) for r in returns_list)
-    portfolio_returns = np.zeros(n_days)
+    n_periods = min(len(r["strategy_returns"]) for r in returns_list)
+    portfolio_returns = np.zeros(n_periods)
     for r in returns_list:
-        portfolio_returns += r["strategy_returns"][:n_days] / len(returns_list)
+        portfolio_returns += r["strategy_returns"][:n_periods] / len(returns_list)
 
-    risk_free_daily = 0.0
+    # Each element of portfolio_returns now spans `horizon` trading days, not
+    # one, so annualisation uses periods-per-year rather than a hardcoded 252.
+    periods_per_year = 252.0 / horizon
+    n_days = n_periods * horizon
+
+    risk_free_period = 0.0
     try:
         from scripts.db import get_engine
         engine = get_engine()
         rf_df = pd.read_sql("SELECT date, close FROM market_indicators WHERE indicator='US_5Y_Treasury' ORDER BY date", engine, parse_dates=["date"])
         if not rf_df.empty:
             rf_daily = (rf_df.set_index("date")["close"] / 100 / 252).reindex(pd.date_range(start=rf_df["date"].min(), end=rf_df["date"].max(), freq="D")).ffill()
-            risk_free_daily = rf_daily.iloc[-n_days:].values.mean()
+            # Scale the daily rate up to one holding period.
+            risk_free_period = rf_daily.iloc[-n_days:].values.mean() * horizon
     except Exception:
         pass
 
+    rf_annual = risk_free_period * periods_per_year
     total_return = np.prod(1 + portfolio_returns) - 1
-    ann_return = (1 + total_return) ** (252 / n_days) - 1
-    ann_vol = np.std(portfolio_returns) * np.sqrt(252)
-    sharpe = (ann_return - risk_free_daily * 252) / (ann_vol + 1e-8)
+    ann_return = (1 + total_return) ** (periods_per_year / max(n_periods, 1)) - 1
+    ann_vol = np.std(portfolio_returns) * np.sqrt(periods_per_year)
+    sharpe = (ann_return - rf_annual) / (ann_vol + 1e-8)
 
     downside_returns = portfolio_returns[portfolio_returns < 0]
-    downside_vol = np.std(downside_returns) * np.sqrt(252) if len(downside_returns) > 1 else ann_vol
-    sortino = (ann_return - risk_free_daily * 252) / (downside_vol + 1e-8)
+    downside_vol = np.std(downside_returns) * np.sqrt(periods_per_year) if len(downside_returns) > 1 else ann_vol
+    sortino = (ann_return - rf_annual) / (downside_vol + 1e-8)
 
     cum_returns = np.cumprod(1 + portfolio_returns)
     running_max = np.maximum.accumulate(cum_returns)
@@ -302,15 +328,17 @@ def evaluate_trading(model_key, y_true, y_pred, df_test, ticker_names):
     max_dd = drawdown.min()
     calmar = ann_return / (abs(max_dd) + 1e-8)
 
-    all_signals = np.concatenate([r["signals"][:n_days] for r in returns_list])
-    all_actual = np.concatenate([(r["actual_returns"][:n_days] > 0).astype(int) for r in returns_list])
+    # Slice by n_periods (array length), not n_days (calendar span): after the
+    # non-overlapping step these differ by a factor of `horizon`.
+    all_signals = np.concatenate([r["signals"][:n_periods] for r in returns_list])
+    all_actual = np.concatenate([(r["actual_returns"][:n_periods] > 0).astype(int) for r in returns_list])
     hit_rate = (all_signals == all_actual).mean()
 
     wins = portfolio_returns[portfolio_returns > 0]
     losses = portfolio_returns[portfolio_returns < 0]
     profit_factor = wins.sum() / abs(losses.sum()) if len(losses) > 0 and losses.sum() != 0 else np.inf
 
-    bh_returns = np.mean([r["actual_returns"][:n_days] for r in returns_list], axis=0)
+    bh_returns = np.mean([r["actual_returns"][:n_periods] for r in returns_list], axis=0)
     up_mask = bh_returns > 0
     down_mask = bh_returns < 0
     up_capture = portfolio_returns[up_mask].mean() / bh_returns[up_mask].mean() if up_mask.any() and bh_returns[up_mask].mean() != 0 else 0
