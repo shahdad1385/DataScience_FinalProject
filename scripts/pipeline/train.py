@@ -20,8 +20,10 @@ from .data_assembly import (
 
 # Import all model modules
 from ..timeseries import pipe as ts_pipe
+from ..timeseries.train import DEFAULT_REG_LOSS
 from ..tabular import pipe as tab_pipe
 from ..clustering import cluster
+from ..activations import DEFAULT_ACTIVATION
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 
@@ -47,7 +49,8 @@ def load_hyperparams():
 
 
 def train_all_models(verbose=True, model_filter=None, epochs=200, lr=1e-3,
-                     patience=30, skip_nlp=False):
+                     patience=30, skip_nlp=False, activation=DEFAULT_ACTIVATION,
+                     reg_loss=DEFAULT_REG_LOSS):
     """
     Full training pipeline.
 
@@ -58,6 +61,8 @@ def train_all_models(verbose=True, model_filter=None, epochs=200, lr=1e-3,
         lr: learning rate for time series models
         patience: early stopping patience
         skip_nlp: skip NLP feature extraction
+        activation: activation for all neural models (default leaky_relu)
+        reg_loss: regression loss for sequence models (huber/mse/mae)
     """
     print("=" * 60)
     print("FULL TRAINING PIPELINE")
@@ -86,12 +91,25 @@ def train_all_models(verbose=True, model_filter=None, epochs=200, lr=1e-3,
         # preprocess.py already scaled. Logistic hung before because it saw features
         # spanning 5+ orders of magnitude, and every other gradient/distance model
         # (MLP, XGBoost margins, etc.) also benefits from uniform scale.
-        from .data_assembly import fit_feature_scaler, apply_feature_scaler
+        from .data_assembly import (
+            fit_feature_scaler, apply_feature_scaler,
+            fit_target_scaler, apply_target_scaler,
+        )
         scaler = fit_feature_scaler(X_train)
         X_train = apply_feature_scaler(X_train, scaler)
         X_val = apply_feature_scaler(X_val, scaler)
         X_test = apply_feature_scaler(X_test, scaler)
         print("  Feature scaler fitted and applied to all splits")
+
+        # Return targets are ~0.02 in magnitude, so an unscaled regression loss
+        # is ~1e-4 next to a ~0.69 BCE term and the regression head would barely
+        # train. Standardise the targets (train-fit only) so the two loss terms
+        # are comparable; predictions are inverse-transformed before use.
+        target_scaler = fit_target_scaler(y_reg_train)
+        y_reg_train = apply_target_scaler(y_reg_train, target_scaler)
+        y_reg_val = apply_target_scaler(y_reg_val, target_scaler)
+        y_reg_test = apply_target_scaler(y_reg_test, target_scaler)
+        print("  Target scaler fitted (returns standardised for balanced loss)")
 
         mlflow.log_param("n_samples_train", X_train.shape[0])
         mlflow.log_param("n_samples_val", X_val.shape[0])
@@ -126,6 +144,13 @@ def train_all_models(verbose=True, model_filter=None, epochs=200, lr=1e-3,
         elif model_filter and model_filter not in ts_models_to_train:
             ts_models_to_train = []
 
+        # Loss configuration shared by every sequence model: Huber on the return
+        # targets plus per-ticker BCE class balancing computed on train only.
+        ts_loss_kwargs = ts_pipe.make_loss_kwargs(y_cls_tr, reg_loss=reg_loss)
+        mlflow.log_param("activation", activation)
+        mlflow.log_param("reg_loss", reg_loss)
+        mlflow.log_param("target_type", "next_day_return")
+
         ts_results = {}
         if ts_models_to_train:
             print("\n[3/6] Training time series models...")
@@ -139,7 +164,8 @@ def train_all_models(verbose=True, model_filter=None, epochs=200, lr=1e-3,
                 model_n_layers = hp.get("n_layers", 2)
                 model_dropout = hp.get("dropout", 0.2)
 
-                print(f"\n  Training {model_name.upper()} (lr={model_lr:.2e}, hidden={model_hidden}, layers={model_n_layers})")
+                print(f"\n  Training {model_name.upper()} (lr={model_lr:.2e}, hidden={model_hidden}, "
+                      f"layers={model_n_layers}, act={activation}, reg_loss={reg_loss})")
                 result = ts_pipe.train_single(
                     model_name,
                     X_tr_seq, y_reg_tr, y_cls_tr,
@@ -149,6 +175,8 @@ def train_all_models(verbose=True, model_filter=None, epochs=200, lr=1e-3,
                     batch_size=model_batch_size, hidden_size=model_hidden,
                     n_layers=model_n_layers, dropout=model_dropout,
                     verbose=verbose,
+                    activation=hp.get("activation", activation),
+                    loss_kwargs=ts_loss_kwargs,
                 )
                 ts_results[model_name] = result
             log_mlflow_metrics(ts_results, "ts")
@@ -188,6 +216,7 @@ def train_all_models(verbose=True, model_filter=None, epochs=200, lr=1e-3,
                 X_tr_flat, y_reg_tr, X_v_flat, y_reg_v,
                 feature_names=feature_names, verbose=verbose,
                 model_filter=tab_reg_models_to_train, hyperparams=hyperparams,
+                activation=activation,
             )
             log_mlflow_metrics(tab_reg_results, "tab_reg")
 
@@ -201,6 +230,7 @@ def train_all_models(verbose=True, model_filter=None, epochs=200, lr=1e-3,
                 X_tr_flat, y_cls_tr, X_v_flat, y_cls_v,
                 feature_names=feature_names, verbose=verbose,
                 model_filter=tab_cls_models_to_train, hyperparams=hyperparams,
+                activation=activation,
             )
             log_mlflow_metrics(tab_cls_results, "tab_cls")
 
@@ -339,9 +369,12 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
         print("ERROR: No test data.")
         return None
 
-    # Reuse the scaler fitted during training. Evaluating unscaled features
+    # Reuse the scalers fitted during training. Evaluating unscaled features
     # against models trained on scaled ones would silently report nonsense.
-    from .data_assembly import load_feature_scaler, apply_feature_scaler
+    from .data_assembly import (
+        load_feature_scaler, apply_feature_scaler,
+        load_target_scaler, apply_target_scaler,
+    )
     scaler = load_feature_scaler()
     if scaler is not None:
         X_train = apply_feature_scaler(X_train, scaler)
@@ -349,6 +382,16 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
         X_test = apply_feature_scaler(X_test, scaler)
     else:
         print("  WARNING: no saved feature scaler; evaluating on raw features.")
+
+    # Targets must be in the same (standardised) space the models were trained
+    # in, otherwise every RMSE/R2 below is computed against a different scale.
+    target_scaler = load_target_scaler()
+    if target_scaler is not None:
+        y_reg_train = apply_target_scaler(y_reg_train, target_scaler)
+        y_reg_val = apply_target_scaler(y_reg_val, target_scaler)
+        y_reg_test = apply_target_scaler(y_reg_test, target_scaler)
+    else:
+        print("  WARNING: no saved target scaler; metrics may be on a different scale.")
 
     (X_tr_seq, y_reg_tr, y_cls_tr,
      X_v_seq, y_reg_v, y_cls_v,
@@ -425,10 +468,19 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 reg_metrics = evaluate_regression(reg_true, reg_pred)
                 cls_metrics = evaluate_classification(cls_true, (cls_pred > 0.5).astype(int), cls_pred)
 
+                # Store the raw prediction arrays, not just the metrics.
+                # run_detailed_evaluation reads reg_pred/cls_pred/cls_prob from
+                # here; without them every --eval-* flag printed "No predictions
+                # for ..." and no plots were ever produced. `model` is kept for
+                # feature importance and stripped again before pickling.
                 results[f"ts_{model_name}"] = {
                     "regression": reg_metrics,
                     "classification": cls_metrics,
                     "val_loss": val_loss,
+                    "reg_pred": reg_pred,
+                    "cls_pred": (cls_pred > 0.5).astype(int),
+                    "cls_prob": cls_pred,
+                    "model": model,
                 }
 
                 print(f"\n  {model_name.upper()} (test):")
@@ -466,7 +518,11 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
         for model_name in tab_models_to_evaluate:
             try:
                 pkl_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_reg.pkl")
-                mlp_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_reg/")
+                # The MLP is saved by torch as `tabular_mlp_reg.pt`. This check
+                # previously looked for a `tabular_mlp_reg/` DIRECTORY, which is
+                # never created, so the MLP was always reported as "no saved
+                # weights" even when it had just been selected as the best model.
+                mlp_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_reg.pt")
                 if not os.path.exists(pkl_path) and not os.path.exists(mlp_path):
                     print(f"  Skipping {model_name}: no saved weights")
                     continue
@@ -502,7 +558,8 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
 
                 # Load and evaluate classification
                 cls_pkl_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_cls.pkl")
-                cls_mlp_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_cls/")
+                # Same `.pt` vs directory mismatch as the regression path above.
+                cls_mlp_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_cls.pt")
                 if os.path.exists(cls_pkl_path):
                     with open(cls_pkl_path, "rb") as f:
                         cls_model = pickle.load(f)
@@ -532,9 +589,15 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
 
                 cls_metrics = evaluate_classification(y_cls_te, pred_cls, prob_cls) if pred_cls is not None else {}
 
+                # Same reason as the time-series branch: the detailed evaluation
+                # stage needs the arrays, not only the summary metrics.
                 results[f"tab_{model_name}"] = {
                     "regression": reg_metrics,
                     "classification": cls_metrics,
+                    "reg_pred": pred_reg,
+                    "cls_pred": pred_cls,
+                    "cls_prob": prob_cls,
+                    "model": model,
                 }
 
                 print(f"\n  {model_name.upper()} (test):")
@@ -552,10 +615,52 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 traceback.print_exc()
                 eval_failures.append(f"tabular_{model_name}: {type(e).__name__}: {e}")
 
-        # Save evaluation results
+        # === Naive baselines ===
+        #
+        # Without a reference point, an R2 or F1 number says nothing about skill.
+        # Two trivial predictors are scored on exactly the same targets:
+        #   - zero return  (i.e. "tomorrow equals today"), the standard
+        #     random-walk benchmark for return prediction
+        #   - always-up direction, the majority class in a rising market
+        # A model that cannot beat these has learned nothing useful.
+        try:
+            from ..tabular.regress import evaluate_regression as _eval_reg
+            from ..tabular.classify import evaluate_classification as _eval_cls
+
+            zero_pred = np.zeros_like(y_reg_te)
+            base_reg = _eval_reg(y_reg_te, zero_pred)
+
+            up_pred = np.ones_like(y_cls_te)
+            base_cls = _eval_cls(y_cls_te, up_pred, up_pred.astype(float))
+
+            results["_baseline"] = {"regression": base_reg, "classification": base_cls}
+
+            print("\n  BASELINE (no-change return / always-up direction):")
+            print(f"    Regression  — RMSE: {base_reg['rmse']:.6f} | MAE: {base_reg['mae']:.6f} | R2: {base_reg['r2']:.4f}")
+            print(f"    Classification — F1: {base_cls.get('f1', 0):.4f} | Acc: {base_cls.get('accuracy', 0):.4f}")
+            mlflow.log_metric("baseline_rmse", base_reg["rmse"])
+            mlflow.log_metric("baseline_f1", base_cls.get("f1", 0))
+
+            beaten = [k for k, v in results.items()
+                      if not k.startswith("_")
+                      and v.get("regression", {}).get("rmse", float("inf")) < base_reg["rmse"]]
+            print(f"    Models beating the baseline RMSE: {beaten if beaten else 'NONE'}")
+        except Exception as e:
+            print(f"  Baseline comparison skipped: {type(e).__name__}: {e}")
+
+        # Save evaluation results.
+        #
+        # Live model objects are dropped from the pickle: a torch module or a
+        # booster is large and not reliably loadable across environments, and the
+        # weights already live in their own checkpoints. Metrics and prediction
+        # arrays are what this file is for.
         eval_path = os.path.join(MODELS_DIR, "evaluation_results.pkl")
+        picklable = {
+            k: {kk: vv for kk, vv in v.items() if kk != "model"} if isinstance(v, dict) else v
+            for k, v in results.items()
+        }
         with open(eval_path, "wb") as f:
-            pickle.dump(results, f)
+            pickle.dump(picklable, f)
         print(f"\nEvaluation results saved to {eval_path}")
 
         # Run detailed evaluation if any flags enabled
@@ -565,11 +670,14 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
             print("=" * 60)
             try:
                 from .evaluate import run_detailed_evaluation
+                # Pass the SEQUENCE-ALIGNED targets: every stored prediction was
+                # produced from X_te_seq, so comparing against y_reg_test would
+                # reintroduce the row-count mismatch this evaluation depends on.
                 run_detailed_evaluation(
                     results=results,
                     X_test=X_test,
-                    y_reg_test=y_reg_test,
-                    y_cls_test=y_cls_test,
+                    y_reg_test=y_reg_te,
+                    y_cls_test=y_cls_te,
                     X_te_seq=X_te_seq,
                     X_te_flat=X_te_flat,
                     df_test=df_test,
@@ -720,9 +828,9 @@ def save_results(ts_results, tab_reg_results, tab_cls_results, ensemble,
                 with open(os.path.join(MODELS_DIR, f"tabular_{name}_reg.pkl"), "wb") as f:
                     pickle.dump(model, f)
             elif name == "mlp":
+                # save_mlp reads model.build_config; no shape reverse-engineering.
                 from ..tabular.mlp import save_model as save_mlp
-                save_mlp(model, f"tabular_{name}_reg", model.net[0].in_features,
-                         [m.out_features for m in model.net if hasattr(m, 'out_features')], 20)
+                save_mlp(model, f"tabular_{name}_reg")
             elif name == "ridge":
                 with open(os.path.join(MODELS_DIR, f"tabular_{name}_reg.pkl"), "wb") as f:
                     pickle.dump(model, f)
@@ -737,8 +845,7 @@ def save_results(ts_results, tab_reg_results, tab_cls_results, ensemble,
                     pickle.dump(model, f)
             elif name == "mlp":
                 from ..tabular.mlp import save_model as save_mlp
-                save_mlp(model, f"tabular_{name}_cls", model.net[0].in_features,
-                         [m.out_features for m in model.net if hasattr(m, 'out_features')], 5, is_classifier=True)
+                save_mlp(model, f"tabular_{name}_cls", is_classifier=True)
             elif name == "logistic":
                 with open(os.path.join(MODELS_DIR, f"tabular_{name}_cls.pkl"), "wb") as f:
                     pickle.dump(model, f)
