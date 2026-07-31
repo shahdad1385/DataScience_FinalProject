@@ -127,8 +127,10 @@ KW_SELECTION_PATH = os.path.join(
 # news tiering (nvda / industry / peer) would triple that to ~3,000 columns
 # against ~1,500 training rows — the same p >> n problem that made the previous
 # model unable to beat a baseline. The most frequent keywords carry nearly all
-# the signal; the long tail is mostly zeros.
-MAX_KEYWORD_COLS = 40
+# the signal; the long tail is mostly zeros. Cut hard: at 40-per-table the joined
+# matrix still reached ~695 columns, which is why no classifier could beat the
+# no-change baseline. 15 keeps the head of the distribution only.
+MAX_KEYWORD_COLS = 15
 
 
 def _load_kw_selection():
@@ -813,15 +815,27 @@ def prepare_data(split="train", feature_cols=None):
         # degrades predictions silently. Dropping them on train keeps the feature
         # set honest; the industry and peer news tiers still carry the text signal.
         useful, dropped = [], []
+        n_train = len(df)
         for c in long_feature_cols:
             col = df[c]
             if col.notna().sum() == 0 or col.nunique(dropna=True) <= 1:
                 dropped.append(c)
-            else:
-                useful.append(c)
+                continue
+            # Mostly-empty columns are noise for the tree/linear models and a
+            # train/serve hazard: they are constant across train but light up at
+            # test time (the 41.7% zero-fill warning). Require some coverage.
+            if col.notna().mean() < 0.20:
+                dropped.append(c)
+                continue
+            # Near-zero-variance columns add dimensionality without signal and
+            # inflate the p >> n problem.
+            if float(col.std(skipna=True) or 0.0) < 1e-8:
+                dropped.append(c)
+                continue
+            useful.append(c)
         if dropped:
-            print(f"  Dropped {len(dropped)} constant/empty feature cols in train "
-                  f"(e.g. {dropped[:4]})")
+            print(f"  Dropped {len(dropped)} constant/sparse/low-variance feature "
+                  f"cols in train (e.g. {dropped[:4]})")
         long_feature_cols = useful
 
         save_joint_schema(long_feature_cols, [])
