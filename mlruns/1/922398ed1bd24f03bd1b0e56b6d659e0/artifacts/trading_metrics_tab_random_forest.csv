@@ -1,0 +1,2 @@
+model,total_return,annualized_return,annualized_volatility,sharpe_ratio,sortino_ratio,max_drawdown,calmar_ratio,hit_rate,profit_factor,up_capture,down_capture,n_days,n_tickers
+tab_random_forest,0.728725352214669,0.538895840725671,0.27896834888856537,1.7931342381277315,2.0835711848240464,-0.16236639082853574,3.3190108173596995,0.5375,1.4397466975648552,0.6073784097883643,0.5529781591791206,320,1
