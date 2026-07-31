@@ -454,6 +454,20 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                     default_kwargs={"n_tickers": n_tickers},
                 )
 
+                # Bail early if the saved model was built for a different
+                # feature count.  The LSTM/GRU/… input_size is baked into
+                # the first Linear after the RNN, so feeding 173 columns
+                # into a model that expects 407 crashes with a cryptic
+                # matmul error下游.
+                saved_input = None
+                for p in model.parameters():
+                    saved_input = p.shape[-1]
+                    break
+                if saved_input is not None and saved_input != X_te_seq.shape[-1]:
+                    print(f"  Skipping {model_name}: input_size mismatch "
+                          f"(saved {saved_input} vs data {X_te_seq.shape[-1]})")
+                    continue
+
                 device = get_device()
                 import torch
                 from torch.utils.data import DataLoader, TensorDataset
@@ -535,6 +549,12 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 if os.path.exists(pkl_path):
                     with open(pkl_path, "rb") as f:
                         model = pickle.load(f)
+                    # Check feature dimension compatibility
+                    saved_n = getattr(model, "n_features_in_", None)
+                    if saved_n is not None and saved_n != X_te_flat.shape[1]:
+                        print(f"  Skipping {model_name} (reg): input_size mismatch "
+                              f"(saved {saved_n} vs data {X_te_flat.shape[1]})")
+                        continue
                     if model_name == "lightgbm":
                         from ..tabular.lightgbm_model import predict_regressor as lgb_predict
                         pred_reg = lgb_predict(model, X_te_flat)
@@ -545,6 +565,11 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 elif os.path.exists(mlp_path):
                     from ..tabular.mlp import predict_regressor, load_model as load_mlp_model
                     model = load_mlp_model(f"tabular_{model_name}_reg")
+                    saved_n = getattr(model, "input_size", None)
+                    if saved_n is not None and saved_n != X_te_flat.shape[1]:
+                        print(f"  Skipping {model_name} (reg): input_size mismatch "
+                              f"(saved {saved_n} vs data {X_te_flat.shape[1]})")
+                        continue
                     pred_reg = predict_regressor(model, X_te_flat)
                 else:
                     continue
@@ -560,42 +585,41 @@ def evaluate_saved_models(model_filter=None, eval_flags=None):
                 cls_pkl_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_cls.pkl")
                 # Same `.pt` vs directory mismatch as the regression path above.
                 cls_mlp_path = os.path.join(MODELS_DIR, f"tabular_{model_name}_cls.pt")
+                cls_model = None
+                pred_cls = None
+                prob_cls = None
                 if os.path.exists(cls_pkl_path):
                     with open(cls_pkl_path, "rb") as f:
                         cls_model = pickle.load(f)
-                    if model_name == "lightgbm":
+                    saved_n = getattr(cls_model, "n_features_in_", None)
+                    if saved_n is not None and saved_n != X_te_flat.shape[1]:
+                        print(f"  Skipping {model_name} (cls): input_size mismatch "
+                              f"(saved {saved_n} vs data {X_te_flat.shape[1]})")
+                        cls_model = None
+                    elif model_name == "lightgbm":
                         from ..tabular.lightgbm_model import predict_classifier as lgb_predict
                         pred_cls, prob_cls = lgb_predict(cls_model, X_te_flat)
                     elif model_name in ("xgboost", "random_forest"):
-                        # Force (n_samples, n_tickers) shape. For a single-target
-                        # (n,1) label, scikit-learn collapses to binary: predict()
-                        # returns 1-D (n,) and predict_proba() returns (n,2) CLASS
-                        # columns [P(down), P(up)]. Passing those through left the
-                        # detailed per-ticker loop indexing [:, i] on a 1-D array,
-                        # which is the IndexError that aborted evaluation on
-                        # random_forest. normalize_binary_outputs reshapes to 2-D
-                        # and keeps only P(up) per output.
                         raw_pred = cls_model.predict(X_te_flat)
                         raw_prob = cls_model.predict_proba(X_te_flat)
                         pred_cls, prob_cls = normalize_binary_outputs(
                             raw_pred, raw_prob, n_outputs=len(TICKERS))
                     elif model_name == "logistic":
-                        # Shaped from y_cls_te (sequence-aligned), not y_cls_test,
-                        # so the per-ticker columns line up with X_te_flat rows.
                         pred_cls = np.zeros_like(y_cls_te, dtype=float)
                         prob_cls = np.zeros_like(y_cls_te, dtype=float)
                         for t in range(n_tickers):
                             pred_cls[:, t] = cls_model[t].predict(X_te_flat)
                             prob_cls[:, t] = cls_model[t].predict_proba(X_te_flat)[:, 1]
-                    else:
-                        continue
                 elif os.path.exists(cls_mlp_path):
                     from ..tabular.mlp import predict_classifier, load_model as load_mlp_model
                     cls_model = load_mlp_model(f"tabular_{model_name}_cls")
-                    pred_cls, prob_cls = predict_classifier(cls_model, X_te_flat)
-                else:
-                    pred_cls = None
-                    prob_cls = None
+                    saved_n = getattr(cls_model, "input_size", None)
+                    if saved_n is not None and saved_n != X_te_flat.shape[1]:
+                        print(f"  Skipping {model_name} (cls): input_size mismatch "
+                              f"(saved {saved_n} vs data {X_te_flat.shape[1]})")
+                        cls_model = None
+                    else:
+                        pred_cls, prob_cls = predict_classifier(cls_model, X_te_flat)
 
                 cls_metrics = evaluate_classification(y_cls_te, pred_cls, prob_cls) if pred_cls is not None else {}
 
