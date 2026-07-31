@@ -14,59 +14,76 @@ from torch.cuda.amp import autocast, GradScaler
 
 from .regress import evaluate_regression
 from .classify import evaluate_classification
+from ..activations import get_activation, DEFAULT_ACTIVATION
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 
 
+def _build_stack(input_size, hidden_sizes, dropout, output_size, activation):
+    """Linear/BatchNorm/activation/Dropout stack ending in a linear head."""
+    layers = []
+    prev_size = input_size
+    for h in hidden_sizes:
+        layers.extend([
+            nn.Linear(prev_size, h),
+            nn.BatchNorm1d(h),
+            get_activation(activation),
+            nn.Dropout(dropout),
+        ])
+        prev_size = h
+    layers.append(nn.Linear(prev_size, output_size))
+    return nn.Sequential(*layers)
+
+
 class MLPRegressor(nn.Module):
-    def __init__(self, input_size, hidden_sizes=[256, 128], dropout=0.2, output_size=20):
+    def __init__(self, input_size, hidden_sizes=[256, 128], dropout=0.2, output_size=20,
+                 activation=DEFAULT_ACTIVATION):
         """
         Args:
             input_size: number of input features
-            hidden_sizes: list of hidden layer sizes
+            hidden_sizes: HIDDEN layer sizes only — must not include output_size
             dropout: dropout rate
             output_size: number of regression outputs (n_tickers * 4)
+            activation: activation name (see scripts/activations.py)
         """
         super().__init__()
-        layers = []
-        prev_size = input_size
-        for h in hidden_sizes:
-            layers.extend([
-                nn.Linear(prev_size, h),
-                nn.BatchNorm1d(h),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-            ])
-            prev_size = h
-        layers.append(nn.Linear(prev_size, output_size))
-        self.net = nn.Sequential(*layers)
+        hidden_sizes = list(hidden_sizes)
+        self.net = _build_stack(input_size, hidden_sizes, dropout, output_size, activation)
+        # Record the exact build config so save_model never has to reverse
+        # engineer it from the layer shapes.
+        self.build_config = {
+            "input_size": input_size,
+            "hidden_sizes": hidden_sizes,
+            "dropout": dropout,
+            "output_size": output_size,
+            "activation": activation,
+        }
 
     def forward(self, x):
         return self.net(x)
 
 
 class MLPClassifier(nn.Module):
-    def __init__(self, input_size, hidden_sizes=[256, 128], dropout=0.2, output_size=5):
+    def __init__(self, input_size, hidden_sizes=[256, 128], dropout=0.2, output_size=5,
+                 activation=DEFAULT_ACTIVATION):
         """
         Args:
             input_size: number of input features
-            hidden_sizes: list of hidden layer sizes
+            hidden_sizes: HIDDEN layer sizes only — must not include output_size
             dropout: dropout rate
             output_size: number of classification outputs (n_tickers)
+            activation: activation name (see scripts/activations.py)
         """
         super().__init__()
-        layers = []
-        prev_size = input_size
-        for h in hidden_sizes:
-            layers.extend([
-                nn.Linear(prev_size, h),
-                nn.BatchNorm1d(h),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-            ])
-            prev_size = h
-        layers.append(nn.Linear(prev_size, output_size))
-        self.net = nn.Sequential(*layers)
+        hidden_sizes = list(hidden_sizes)
+        self.net = _build_stack(input_size, hidden_sizes, dropout, output_size, activation)
+        self.build_config = {
+            "input_size": input_size,
+            "hidden_sizes": hidden_sizes,
+            "dropout": dropout,
+            "output_size": output_size,
+            "activation": activation,
+        }
 
     def forward(self, x):
         return torch.sigmoid(self.net(x))
@@ -126,11 +143,13 @@ def _train_loop(model, train_loader, val_loader, lr=1e-3, epochs=50,
 
 def train_regressor(X_train, y_train, X_val=None, y_val=None,
                     hidden_sizes=[256, 128], dropout=0.2, lr=1e-3,
-                    epochs=50, batch_size=64, patience=30, verbose=False):
-    """Train MLP regressor for OHLC prediction."""
+                    epochs=50, batch_size=64, patience=30, verbose=False,
+                    activation=DEFAULT_ACTIVATION):
+    """Train MLP regressor for next-day return prediction."""
     input_size = X_train.shape[1]
     output_size = y_train.shape[1]
-    model = MLPRegressor(input_size, hidden_sizes, dropout, output_size)
+    model = MLPRegressor(input_size, hidden_sizes, dropout, output_size,
+                         activation=activation)
 
     train_ds = TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train))
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
@@ -147,11 +166,13 @@ def train_regressor(X_train, y_train, X_val=None, y_val=None,
 
 def train_classifier(X_train, y_train, X_val=None, y_val=None,
                      hidden_sizes=[256, 128], dropout=0.2, lr=1e-3,
-                     epochs=50, batch_size=64, patience=30, verbose=False):
+                     epochs=50, batch_size=64, patience=30, verbose=False,
+                     activation=DEFAULT_ACTIVATION):
     """Train MLP classifier for direction prediction."""
     input_size = X_train.shape[1]
     output_size = y_train.shape[1]
-    model = MLPClassifier(input_size, hidden_sizes, dropout, output_size)
+    model = MLPClassifier(input_size, hidden_sizes, dropout, output_size,
+                          activation=activation)
 
     train_ds = TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train))
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
@@ -198,27 +219,63 @@ def evaluate_classifier(model, X_test, y_test):
     return evaluate_classification(y_test, y_pred, y_prob)
 
 
-def save_model(model, name, input_size, hidden_sizes, output_size, is_classifier=False):
-    """Save trained MLP model."""
+def save_model(model, name, input_size=None, hidden_sizes=None, output_size=None,
+               is_classifier=None):
+    """Save a trained MLP using the config recorded at construction time.
+
+    The explicit arguments are kept for backwards compatibility but are only
+    fallbacks. Callers previously derived hidden_sizes from the layer shapes with
+    `[m.out_features for m in model.net if hasattr(m, "out_features")]`, which
+    also picks up BatchNorm layers and the final output layer — producing
+    [256, 128, 20] instead of [256, 128]. Rebuilding from that list created four
+    extra layers and load_state_dict failed on missing net.9.*/net.12.* keys.
+    """
+    cfg = dict(getattr(model, "build_config", {}) or {})
+    if not cfg:
+        cfg = {
+            "input_size": input_size,
+            "hidden_sizes": list(hidden_sizes or []),
+            "output_size": output_size,
+            "dropout": 0.2,
+            "activation": DEFAULT_ACTIVATION,
+        }
+    if is_classifier is None:
+        is_classifier = isinstance(model, MLPClassifier)
+
     os.makedirs(MODELS_DIR, exist_ok=True)
     path = os.path.join(MODELS_DIR, f"{name}.pt")
     torch.save({
         "model_state_dict": model.state_dict(),
-        "input_size": input_size,
-        "hidden_sizes": hidden_sizes,
-        "output_size": output_size,
-        "is_classifier": is_classifier,
+        "build_config": cfg,
+        # Flat copies kept so older readers still work.
+        "input_size": cfg.get("input_size"),
+        "hidden_sizes": cfg.get("hidden_sizes"),
+        "output_size": cfg.get("output_size"),
+        "is_classifier": bool(is_classifier),
     }, path)
     return path
 
 
 def load_model(name):
-    """Load trained MLP model."""
+    """Load a trained MLP, rebuilding from the stored build config."""
     path = os.path.join(MODELS_DIR, f"{name}.pt")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"No MLP checkpoint at {path}")
     ckpt = torch.load(path, map_location="cpu")
-    if ckpt["is_classifier"]:
-        model = MLPClassifier(ckpt["input_size"], ckpt["hidden_sizes"], output_size=ckpt["output_size"])
-    else:
-        model = MLPRegressor(ckpt["input_size"], ckpt["hidden_sizes"], output_size=ckpt["output_size"])
-    model.load_state_dict(ckpt["model_state_dict"])
+
+    cfg = ckpt.get("build_config") or {
+        "input_size": ckpt.get("input_size"),
+        "hidden_sizes": ckpt.get("hidden_sizes") or [],
+        "output_size": ckpt.get("output_size"),
+    }
+    cls = MLPClassifier if ckpt.get("is_classifier") else MLPRegressor
+    model = cls(
+        cfg["input_size"],
+        cfg.get("hidden_sizes") or [256, 128],
+        dropout=cfg.get("dropout", 0.2),
+        output_size=cfg["output_size"],
+        activation=cfg.get("activation", DEFAULT_ACTIVATION),
+    )
+    model.load_state_dict(ckpt["model_state_dict"], strict=True)
+    model.eval()
     return model
