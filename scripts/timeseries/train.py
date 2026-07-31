@@ -22,19 +22,68 @@ def get_device():
     return torch.device("cpu")
 
 
-def combined_loss(reg_pred, cls_pred, reg_target, cls_target, reg_weight=0.5, cls_weight=0.5):
+DEFAULT_REG_LOSS = "huber"
+# The return targets are standardised (see data_assembly.fit_target_scaler), so
+# residuals are on a unit-variance scale and delta=1.0 is the correct transition
+# point: quadratic for ordinary days, linear beyond ~1 sigma so fat-tail moves
+# cannot dominate the gradient. If targets are ever left unscaled (~1e-2), this
+# must shrink to roughly one sigma of the raw returns or Huber degenerates to MSE.
+DEFAULT_HUBER_DELTA = 1.0
+
+
+def _reg_criterion(kind=DEFAULT_REG_LOSS, delta=DEFAULT_HUBER_DELTA):
+    """Regression criterion for the return targets.
+
+    Huber is the default: daily returns have fat tails, and squared error lets a
+    handful of large-move days dominate the gradient, which pushes the model
+    toward predicting the unconditional mean. Huber caps the influence of those
+    outliers while staying quadratic near zero.
     """
-    Combined loss: MSE for OHLC regression + BCE for direction classification.
+    kind = (kind or DEFAULT_REG_LOSS).lower()
+    if kind in ("huber", "smooth_l1"):
+        return nn.HuberLoss(delta=delta)
+    if kind == "mse":
+        return nn.MSELoss()
+    if kind in ("mae", "l1"):
+        return nn.L1Loss()
+    raise ValueError(f"Unknown regression loss {kind!r}; use huber, mse or mae.")
+
+
+def combined_loss(reg_pred, cls_pred, reg_target, cls_target, reg_weight=0.5,
+                  cls_weight=0.5, reg_loss_kind=DEFAULT_REG_LOSS,
+                  huber_delta=DEFAULT_HUBER_DELTA, pos_weight=None):
+    """
+    Combined loss: Huber (or MSE/MAE) for return regression + BCE for direction.
     cls_pred should be raw logits (no sigmoid) — BCEWithLogitsLoss handles it.
+
+    pos_weight rebalances the direction loss when up and down days are unequal,
+    so the classifier cannot get a good score by always predicting the majority
+    direction.
     """
-    reg_loss = nn.MSELoss()(reg_pred, reg_target)
-    cls_loss = nn.BCEWithLogitsLoss()(cls_pred, cls_target)
+    reg_loss = _reg_criterion(reg_loss_kind, huber_delta)(reg_pred, reg_target)
+    if pos_weight is not None:
+        pos_weight = pos_weight.to(cls_pred.device)
+    cls_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(cls_pred, cls_target)
     return reg_weight * reg_loss + cls_weight * cls_loss, reg_loss.item(), cls_loss.item()
 
 
-def train_one_epoch(model, loader, optimizer, device, use_amp=True):
+def compute_pos_weight(y_cls):
+    """Per-ticker BCE pos_weight = (#negatives / #positives), computed on train."""
+    y = np.asarray(y_cls, dtype=np.float64)
+    if y.ndim == 1:
+        y = y.reshape(-1, 1)
+    pos = y.sum(axis=0)
+    neg = y.shape[0] - pos
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = np.where(pos > 0, neg / np.maximum(pos, 1e-9), 1.0)
+    # Clamp so a nearly-single-class ticker cannot explode the loss.
+    return torch.tensor(np.clip(w, 0.25, 4.0), dtype=torch.float32)
+
+
+def train_one_epoch(model, loader, optimizer, device, use_amp=True, loss_kwargs=None):
     """Train for one epoch. Returns average loss."""
     model.train()
+    loss_kwargs = loss_kwargs or {}
     scaler = GradScaler(enabled=use_amp and device.type == "cuda")
     total_loss = 0
     n_batches = 0
@@ -47,7 +96,7 @@ def train_one_epoch(model, loader, optimizer, device, use_amp=True):
         optimizer.zero_grad()
         with autocast(enabled=use_amp and device.type == "cuda"):
             reg_pred, cls_pred = model(x)
-            loss, _, _ = combined_loss(reg_pred, cls_pred, y_reg, y_cls)
+            loss, _, _ = combined_loss(reg_pred, cls_pred, y_reg, y_cls, **loss_kwargs)
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -61,10 +110,11 @@ def train_one_epoch(model, loader, optimizer, device, use_amp=True):
     return total_loss / max(n_batches, 1)
 
 
-def validate(model, loader, device):
+def validate(model, loader, device, loss_kwargs=None):
     """Validate model. Returns average loss and predictions (cls predictions are sigmoid-applied)."""
     model = model.to(device)
     model.eval()
+    loss_kwargs = loss_kwargs or {}
     total_loss = 0
     n_batches = 0
     all_reg_pred, all_cls_pred = [], []
@@ -77,7 +127,7 @@ def validate(model, loader, device):
             y_cls = y_cls.to(device)
 
             reg_pred, cls_logits = model(x)
-            loss, _, _ = combined_loss(reg_pred, cls_logits, y_reg, y_cls)
+            loss, _, _ = combined_loss(reg_pred, cls_logits, y_reg, y_cls, **loss_kwargs)
 
             total_loss += loss.item()
             n_batches += 1
@@ -105,7 +155,8 @@ def validate(model, loader, device):
 
 
 def train_model(model, train_loader, val_loader, lr=1e-3, epochs=200,
-                patience=30, device=None, use_amp=True, verbose=True):
+                patience=30, device=None, use_amp=True, verbose=True,
+                loss_kwargs=None):
     """
     Full training loop with early stopping.
 
@@ -119,6 +170,7 @@ def train_model(model, train_loader, val_loader, lr=1e-3, epochs=200,
         device: torch device (auto-detected if None)
         use_amp: use mixed precision on GPU
         verbose: print progress
+        loss_kwargs: forwarded to combined_loss (reg loss kind, pos_weight, ...)
 
     Returns:
         best_model, history dict
@@ -126,8 +178,10 @@ def train_model(model, train_loader, val_loader, lr=1e-3, epochs=200,
     if device is None:
         device = get_device()
     model = model.to(device)
+    loss_kwargs = loss_kwargs or {}
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    # Track the same objective used for early stopping.
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     best_val_loss = float("inf")
@@ -137,8 +191,9 @@ def train_model(model, train_loader, val_loader, lr=1e-3, epochs=200,
 
     for epoch in range(epochs):
         t0 = time.time()
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, use_amp)
-        val_loss, _ = validate(model, val_loader, device)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, use_amp,
+                                     loss_kwargs=loss_kwargs)
+        val_loss, _ = validate(model, val_loader, device, loss_kwargs=loss_kwargs)
         scheduler.step(val_loss)
         dt = time.time() - t0
 
