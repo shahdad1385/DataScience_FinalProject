@@ -68,7 +68,19 @@ warnings.filterwarnings("ignore")
 
 engine = get_engine()
 SPLITS = ["train", "val", "test"]
-TICKERS = ["NVDA", "GOOGL", "AVGO", "AMD", "TSM"]
+# Every ticker whose news is worth extracting features from.
+#
+# The model predicts NVDA only, but it is fed the whole sector's coverage: NVDA
+# itself has just 268 tagged articles (and none before the test cutoff), while
+# peers and industry-wide pieces contribute ~11,000. Restricting this list to the
+# old five names discarded ~9,000 usable articles. data_assembly folds the peer
+# rows into sector aggregates rather than per-ticker features.
+TARGET_TICKER = "NVDA"
+PEER_TICKERS = [
+    "GOOGL", "AVGO", "AMD", "TSM", "INTC", "MU", "QCOM", "AMAT", "ASML",
+    "KLAC", "LRCX", "MRVL", "NXPI", "ON", "META", "SMCI", "VRT", "ARM", "MOD",
+]
+TICKERS = [TARGET_TICKER] + PEER_TICKERS
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 
 
@@ -89,6 +101,13 @@ def save_nlp_models(models):
             pickle.dump(models["kmeans"], f)
     if "bert" in models and "bert_pca" in models:
         bert_module.save_artifacts(models["bert"], models["bert_pca"])
+    # Keyword vocabularies must survive across processes: a later --skip-nlp or
+    # prediction-only run has to reproduce exactly the training columns.
+    for key, fname in (("kw_vocab_w2v", "kw_vocab_w2v.pkl"),
+                       ("kw_vocab_bert", "kw_vocab_bert.pkl")):
+        if models.get(key):
+            with open(os.path.join(MODELS_DIR, fname), "wb") as f:
+                pickle.dump(models[key], f)
     print(f"  NLP models saved to {MODELS_DIR}")
 
 
@@ -120,6 +139,14 @@ def load_nlp_models():
             models["bert"], models["bert_pca"] = bert_module.load_artifacts()
         except Exception:
             pass
+    # Training keyword vocabularies, so val/test columns match train even when
+    # the splits are processed in separate runs.
+    for key, fname in (("kw_vocab_w2v", "kw_vocab_w2v.pkl"),
+                       ("kw_vocab_bert", "kw_vocab_bert.pkl")):
+        path = os.path.join(MODELS_DIR, fname)
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                models[key] = pickle.load(f)
     return models
 
 
@@ -252,7 +279,15 @@ def process_split(split, models=None):
     elif "w2v" not in models:
         models["w2v"] = w2v_module.load()
     w2v_model = models["w2v"]
-    create_table(split, extract_keywords_w2v(df_news, w2v_model), f"{split}_nlp_kw_w2v")
+    # Pin the keyword columns to the training vocabulary so all three splits
+    # emit the same feature set.
+    if split == "train":
+        kw_w2v, vocab_w2v = extract_keywords_w2v(df_news, w2v_model, return_vocab=True)
+        models["kw_vocab_w2v"] = vocab_w2v
+    else:
+        kw_w2v = extract_keywords_w2v(df_news, w2v_model,
+                                      vocab=models.get("kw_vocab_w2v"))
+    create_table(split, kw_w2v, f"{split}_nlp_kw_w2v")
 
     # 4. Keywords (BERT-based)
     if bert_module.HAS_SENTENCE_TRANSFORMERS:
@@ -271,7 +306,14 @@ def process_split(split, models=None):
             except Exception:
                 models["bert"] = bert_module.load_model()
                 models["bert_pca"] = None
-        create_table(split, extract_keywords_bert(df_news, models["bert"]), f"{split}_nlp_kw_bert")
+        if split == "train":
+            kw_bert, vocab_bert = extract_keywords_bert(df_news, models["bert"],
+                                                        return_vocab=True)
+            models["kw_vocab_bert"] = vocab_bert
+        else:
+            kw_bert = extract_keywords_bert(df_news, models["bert"],
+                                            vocab=models.get("kw_vocab_bert"))
+        create_table(split, kw_bert, f"{split}_nlp_kw_bert")
     else:
         print(f"  [4/11] Keywords (BERT) skipped")
 
