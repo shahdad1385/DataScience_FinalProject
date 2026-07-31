@@ -420,6 +420,15 @@ TARGET_SUFFIXES = [f"target_ret_{c}" for c in OHLC_COLS] + ["target_direction"]
 # return back into a dollar price.
 REF_CLOSE_SUFFIX = "refclose"
 
+# Days where |next-day return| is below this carry no directional information:
+# the move is within bid/ask noise and slippage, so labeling them UP/DOWN forces
+# the classifier to fit coin-flips. In the last run the best classifier still
+# needed every day labeled UP just to reach 52.8%. Labeling only meaningful
+# moves and dropping the flat days from the classification target makes the
+# UP/DOWN classes real; regression targets are deliberately untouched so price
+# reconstruction keeps its full density.
+DIRECTION_DEAD_ZONE = 0.003
+
 
 def add_targets(df):
     """Add next-day RETURN targets for each ticker.
@@ -470,6 +479,15 @@ def add_targets(df):
         # Keep NaN where the next day is unknown so the row is dropped below,
         # rather than silently becoming a "down" label.
         direction = direction.where(next_close.notna() & denom.notna())
+
+        # Dead-zone: near-flat days carry no directional information. Days whose
+        # |next-day close return| is below DIRECTION_DEAD_ZONE are masked to NaN
+        # for the direction label. The downstream prepare_data treats a missing
+        # direction as "exclude this row", so these noisy days are removed from
+        # training and evaluation entirely instead of forcing the classifier to
+        # fit coin-flips.
+        ret = (next_close / denom - 1.0).abs()
+        direction = direction.where(ret >= DIRECTION_DEAD_ZONE)
         df.loc[mask, f"{ticker}_target_direction"] = direction.values
 
         # Today's real close, used to reconstruct dollar prices from returns.
@@ -874,6 +892,21 @@ def prepare_data(split="train", feature_cols=None):
                 print(f"           Examples: {missing[:5]}")
     else:
         final_cols = all_feature_cols
+
+    # Exclude dead-zone rows: a missing direction label marks a near-flat day,
+    # which carries no UP/DOWN signal. Dropping the whole row (rather than
+    # NaN->0) removes them from training and evaluation; regression keeps the
+    # same rows so the two tasks stay aligned per date. Without this the NaN
+    # would silently filldown to DOWN and re-inject the noise we just removed.
+    present_cls = [c for c in cls_target_cols if c in df.columns]
+    if present_cls:
+        before = len(df)
+        df = df.dropna(subset=present_cls).reset_index(drop=True)
+        dropped = before - len(df)
+        if dropped:
+            print(f"  Dead-zone: dropped {dropped} near-flat rows "
+                  f"({100.0*dropped/max(before,1):.1f}%) with |next return| < "
+                  f"{DIRECTION_DEAD_ZONE}")
 
     # Fill NaN features with 0
     X = df[final_cols].fillna(0).values.astype(np.float32)
