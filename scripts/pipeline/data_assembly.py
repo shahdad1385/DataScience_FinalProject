@@ -40,7 +40,38 @@ PEER_TICKERS = [
     "KLAC", "LRCX", "MRVL", "NXPI", "ON", "META", "SMCI", "VRT", "ARM", "MOD",
 ]
 
-SEQ_LEN = 30
+# Lookback window fed to the sequence models, in trading days.
+# 63 ~= 3 calendar months, 21 ~= 1 month, 30 was the previous default.
+SEQ_LEN = 63
+
+# Prediction horizon in trading days. This is the single most consequential
+# setting in the project.
+#
+# Measured on NVDA's full history, forward-return signal-to-noise (|mean|/std)
+# and the base rate both grow sharply with horizon:
+#
+#     horizon   SNR      vs 1d    up-rate
+#      1 day    0.0707   1.0x     0.5389
+#      5 days   0.1619   2.3x     0.5804
+#     10 days   0.2287   3.2x     0.5949
+#     21 days   0.3230   4.6x     0.6379
+#
+# Lag-1 autocorrelation of daily returns is -0.083, i.e. one-day direction is
+# very close to a coin flip, which is why every model hovered around the base
+# rate no matter how it was tuned. Predicting a 5-day forward return asks a
+# question that actually has an answer in this data.
+HORIZON = 5
+
+# Direction dead-zone at the 1-day horizon: moves smaller than this carry no
+# usable directional information and are excluded from the labels.
+# dead_zone_for() scales it by sqrt(horizon) so roughly the same fraction of
+# days is excluded at any horizon (returns scale with sqrt(time)).
+DIRECTION_DEAD_ZONE_1D = 0.003
+
+
+def dead_zone_for(horizon=HORIZON):
+    """Dead-zone threshold for a given horizon, scaled as sqrt(time)."""
+    return DIRECTION_DEAD_ZONE_1D * float(np.sqrt(max(int(horizon), 1)))
 
 
 def load_table(table_name):
@@ -420,18 +451,8 @@ TARGET_SUFFIXES = [f"target_ret_{c}" for c in OHLC_COLS] + ["target_direction"]
 # return back into a dollar price.
 REF_CLOSE_SUFFIX = "refclose"
 
-# Days where |next-day return| is below this carry no directional information:
-# the move is within bid/ask noise and slippage, so labeling them UP/DOWN forces
-# the classifier to fit coin-flips. In the last run the best classifier still
-# needed every day labeled UP just to reach 52.8%. Labeling only meaningful
-# moves and dropping the flat days from the classification target makes the
-# UP/DOWN classes real; regression targets are deliberately untouched so price
-# reconstruction keeps its full density.
-DIRECTION_DEAD_ZONE = 0.003
-
-
-def add_targets(df):
-    """Add next-day RETURN targets for each ticker.
+def add_targets(df, horizon=HORIZON):
+    """Add forward RETURN targets for each ticker at `horizon` trading days.
 
     Why returns rather than absolute price levels: the price columns are scaled
     with a RobustScaler fitted on train only, and these are non-stationary
@@ -445,9 +466,19 @@ def add_targets(df):
     same model output range is valid everywhere. Dollar prices are recovered
     downstream as ref_close * (1 + predicted_return).
 
-    Regression targets: (next_day_{O,H,L,C} / today_close) - 1
-    Classification target: 1 if next close > today close else 0
+    Why a multi-day horizon: at 1 day, NVDA's lag-1 return autocorrelation is
+    -0.083 and forward SNR is 0.071, so the label is near-random and every model
+    collapsed onto the base rate. At 5 days SNR is 2.3x higher. The horizon is
+    what makes the target learnable; nothing else here changes that.
+
+    Regression targets: (close_{t+h}_{O,H,L,C} / today_close) - 1
+    Classification target: 1 if close_{t+h} > close_t else 0
+
+    Args:
+        horizon: forward trading days to predict (default HORIZON).
     """
+    horizon = int(max(int(horizon), 1))
+    dead_zone = dead_zone_for(horizon)
     df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
 
     # Returns are computed from the ORIGINAL unscaled prices, read straight from
@@ -470,30 +501,34 @@ def add_targets(df):
         # Guard against non-positive prices before dividing.
         denom = today_close.where(today_close > 0)
 
+        # shift(-horizon) looks `horizon` trading days ahead. Because the frame
+        # is sorted by (ticker, date) and masked per ticker, this never reads
+        # across a ticker boundary.
         for col in OHLC_COLS:
-            next_price = pd.Series(real_df.loc[mask, col].values).shift(-1)
+            next_price = pd.Series(real_df.loc[mask, col].values).shift(-horizon)
             df.loc[mask, f"{ticker}_target_ret_{col}"] = (next_price / denom - 1.0).values
 
-        next_close = today_close.shift(-1)
+        next_close = today_close.shift(-horizon)
         direction = (next_close > today_close)
-        # Keep NaN where the next day is unknown so the row is dropped below,
+        # Keep NaN where the forward day is unknown so the row is dropped below,
         # rather than silently becoming a "down" label.
         direction = direction.where(next_close.notna() & denom.notna())
 
-        # Dead-zone: near-flat days carry no directional information. Days whose
-        # |next-day close return| is below DIRECTION_DEAD_ZONE are masked to NaN
-        # for the direction label. The downstream prepare_data treats a missing
-        # direction as "exclude this row", so these noisy days are removed from
-        # training and evaluation entirely instead of forcing the classifier to
-        # fit coin-flips.
+        # Dead-zone: near-flat moves carry no directional information. Moves
+        # whose |forward close return| is below the horizon-scaled threshold are
+        # masked to NaN for the direction label. The downstream prepare_data
+        # treats a missing direction as "exclude this row", so these noisy days
+        # are removed from training and evaluation entirely instead of forcing
+        # the classifier to fit coin-flips.
         ret = (next_close / denom - 1.0).abs()
-        direction = direction.where(ret >= DIRECTION_DEAD_ZONE)
+        direction = direction.where(ret >= dead_zone)
         df.loc[mask, f"{ticker}_target_direction"] = direction.values
 
         # Today's real close, used to reconstruct dollar prices from returns.
         df.loc[mask, f"{ticker}_{REF_CLOSE_SUFFIX}"] = today_close.values
 
-    # Drop rows whose own ticker's targets are unknown (last day per ticker).
+    # Drop rows whose own ticker's targets are unknown (last `horizon` days per
+    # ticker, since shift(-horizon) leaves that many NaNs at the tail).
     own_cols = [f"{t}_{s}" for t in TICKERS for s in TARGET_SUFFIXES]
     have = [c for c in own_cols if c in df.columns]
     if have:
@@ -781,12 +816,16 @@ def create_sequences_with_context(X, y_reg, y_cls, context=None, seq_len=SEQ_LEN
             np.asarray(label_idx, dtype=int))
 
 
-def prepare_data(split="train", feature_cols=None):
+def prepare_data(split="train", feature_cols=None, horizon=HORIZON):
     """
     Full data preparation pipeline.
     If feature_cols is provided (for val/test), align to those columns.
     Returns: X, y_reg, y_cls, feature_cols, df_with_targets
+
+    Args:
+        horizon: forward trading days predicted by the targets.
     """
+    horizon = int(max(int(horizon), 1))
     print(f"\n  Loading {split} features...")
     features = load_split_features(split)
 
@@ -800,12 +839,26 @@ def prepare_data(split="train", feature_cols=None):
     print(f"  Merged shape: {df.shape}")
 
     # Add targets
-    print(f"  Adding targets...")
-    df = add_targets(df)
+    print(f"  Adding targets (horizon={horizon}d)...")
+    df = add_targets(df, horizon=horizon)
 
     if df.empty:
         print(f"  No data after adding targets")
         return None, None, None, None, None
+
+    # Purge the last (horizon - 1) rows of train and val.
+    #
+    # A row's target reads prices `horizon` days ahead. For rows near the end of
+    # a split, that window extends past the split boundary into the NEXT split,
+    # so training on them leaks future prices that belong to val/test. This is
+    # the standard purge/embargo from financial cross-validation. Test is left
+    # intact: nothing follows it, so there is nothing to leak from.
+    if horizon > 1 and split in ("train", "val"):
+        n_purge = horizon - 1
+        if len(df) > n_purge:
+            df = df.iloc[:-n_purge].reset_index(drop=True)
+            print(f"  Embargo: purged last {n_purge} rows of '{split}' "
+                  f"(their {horizon}d target would read into the next split)")
 
     # Separate features and targets. `_refclose` is a helper for reconstructing
     # dollar prices from returns, not a feature — excluding it also prevents the
@@ -905,8 +958,8 @@ def prepare_data(split="train", feature_cols=None):
         dropped = before - len(df)
         if dropped:
             print(f"  Dead-zone: dropped {dropped} near-flat rows "
-                  f"({100.0*dropped/max(before,1):.1f}%) with |next return| < "
-                  f"{DIRECTION_DEAD_ZONE}")
+                  f"({100.0*dropped/max(before,1):.1f}%) with "
+                  f"|{horizon}d return| < {dead_zone_for(horizon):.4f}")
 
     # Fill NaN features with 0
     X = df[final_cols].fillna(0).values.astype(np.float32)
