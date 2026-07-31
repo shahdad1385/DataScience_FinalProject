@@ -15,9 +15,9 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.db import get_engine
-from scripts.preprocessing.preprocess import inverse_transform_column
-
-from .data_assembly import prepare_data, flatten_sequences, TICKERS, SEQ_LEN
+from .data_assembly import (
+    prepare_data, flatten_sequences, TICKERS, SEQ_LEN, REF_CLOSE_SUFFIX,
+)
 
 OHLC = ["open", "high", "low", "close"]
 
@@ -54,18 +54,17 @@ def load_models():
                 with open(path, "rb") as f:
                     models[f"tab_{name}_{task}"] = pickle.load(f)
 
-    # MLP
+    # MLP.
+    #
+    # Rebuilt via mlp.load_model, which reads the stored build_config. Building
+    # it here from ckpt["hidden_sizes"] was the direct cause of the
+    # "Missing key(s) net.9.*/net.12.*" crash, because that list included the
+    # output layer and produced a deeper network than the one that was trained.
     from ..tabular import mlp
     for task in ["reg", "cls"]:
         path = os.path.join(models_dir, f"tabular_mlp_{task}.pt")
         if os.path.exists(path):
-            ckpt = torch.load(path, map_location="cpu")
-            if ckpt["is_classifier"]:
-                model = mlp.MLPClassifier(ckpt["input_size"], ckpt["hidden_sizes"], output_size=ckpt["output_size"])
-            else:
-                model = mlp.MLPRegressor(ckpt["input_size"], ckpt["hidden_sizes"], output_size=ckpt["output_size"])
-            model.load_state_dict(ckpt["model_state_dict"])
-            models[f"tab_mlp_{task}"] = model
+            models[f"tab_mlp_{task}"] = mlp.load_model(f"tabular_mlp_{task}")
 
     # Ridge / Logistic
     for name, task in [("ridge", "reg"), ("logistic", "cls")]:
@@ -112,6 +111,9 @@ def predict_all(models):
     if scaler is not None:
         X_test = apply_feature_scaler(X_test, scaler)
         X_val = apply_feature_scaler(X_val, scaler)
+
+    # y_reg_test stays in REAL return units here: model outputs are inverse
+    # transformed below, so actuals must not be scaled.
     X_seq, y_reg_seq, y_cls_seq, label_index = create_sequences_with_context(
         X_test, y_reg_test, y_cls_test, context=X_val)
     X_flat = flatten_sequences(X_seq)
@@ -204,21 +206,31 @@ def build_ensemble(predictions):
     return reg, cls, prob
 
 
-def to_real_prices(scaled_matrix):
-    """Inverse-transform a (n, n_tickers*4) OHLC matrix into dollar prices.
+def to_real_prices(return_matrix, df_labels):
+    """Convert predicted next-day RETURNS into dollar prices.
 
-    Targets were derived from the RobustScaler-scaled stock_prices columns, so
-    each OHLC column is mapped back through that same column's scaler.
+    The models now predict returns relative to today's close, so a price is
+    recovered as ref_close * (1 + predicted_return). ref_close is today's real
+    (unscaled) close, carried alongside the targets as {TICKER}_refclose.
+
+    This replaces the old inverse-scaler path, which applied only when the
+    targets were scaled absolute price levels.
     """
-    if scaled_matrix is None:
+    if return_matrix is None:
         return None
-    scaled_matrix = np.asarray(scaled_matrix, dtype=float)
-    out = np.empty_like(scaled_matrix)
-    for t_i in range(len(TICKERS)):
-        for c_i, col in enumerate(OHLC):
+    return_matrix = np.asarray(return_matrix, dtype=float)
+    out = np.full_like(return_matrix, np.nan)
+
+    for t_i, ticker in enumerate(TICKERS):
+        ref_col = f"{ticker}_{REF_CLOSE_SUFFIX}"
+        if ref_col not in df_labels.columns:
+            continue
+        ref = pd.to_numeric(df_labels[ref_col], errors="coerce").values
+        n = min(len(ref), return_matrix.shape[0])
+        for c_i in range(len(OHLC)):
             j = t_i * 4 + c_i
-            if j < scaled_matrix.shape[1]:
-                out[:, j] = inverse_transform_column("stock_prices", col, scaled_matrix[:, j])
+            if j < return_matrix.shape[1]:
+                out[:n, j] = ref[:n] * (1.0 + return_matrix[:n, j])
     return out
 
 
@@ -231,6 +243,12 @@ def save_predictions_to_db(predictions, df_test):
     engine = get_engine()
 
     reg, cls, prob = build_ensemble(predictions)
+    # Models were trained on standardised returns, so their outputs must be
+    # mapped back to real return units before any price reconstruction.
+    from .data_assembly import inverse_target_scale, load_target_scaler
+    target_scaler = load_target_scaler()
+    if target_scaler is not None and reg is not None:
+        reg = inverse_target_scale(reg, target_scaler)
     actuals = predictions.get("_actuals", {})
     y_reg = actuals.get("reg")
     y_cls = actuals.get("cls")
@@ -241,8 +259,9 @@ def save_predictions_to_db(predictions, df_test):
 
     n_rows = len(reg) if reg is not None else len(cls)
 
-    reg_real = to_real_prices(reg)
-    actual_real = to_real_prices(y_reg)
+    # Predicted/actual returns -> dollar prices via today's real close.
+    reg_real = to_real_prices(reg, df_test)
+    actual_real = to_real_prices(y_reg, df_test)
 
     dates = pd.to_datetime(df_test["date"]).dt.strftime("%Y-%m-%d").tolist() \
         if "date" in df_test.columns else [None] * n_rows
@@ -258,10 +277,20 @@ def save_predictions_to_db(predictions, df_test):
             for c_i, col in enumerate(OHLC):
                 j = t_i * 4 + c_i
                 row[f"predicted_{col}"] = (
-                    float(reg_real[i, j]) if reg_real is not None and j < reg_real.shape[1] else None
+                    float(reg_real[i, j]) if reg_real is not None and j < reg_real.shape[1]
+                    and np.isfinite(reg_real[i, j]) else None
                 )
                 row[f"actual_{col}"] = (
-                    float(actual_real[i, j]) if actual_real is not None and j < actual_real.shape[1] else None
+                    float(actual_real[i, j]) if actual_real is not None and j < actual_real.shape[1]
+                    and np.isfinite(actual_real[i, j]) else None
+                )
+                # Keep the raw model output too: returns are what was actually
+                # predicted, prices are a reconstruction on top of them.
+                row[f"predicted_return_{col}"] = (
+                    float(reg[i, j]) if reg is not None and j < reg.shape[1] else None
+                )
+                row[f"actual_return_{col}"] = (
+                    float(y_reg[i, j]) if y_reg is not None and j < y_reg.shape[1] else None
                 )
 
             row["direction"] = (
@@ -289,6 +318,10 @@ def save_predictions_to_db(predictions, df_test):
                 predicted_high FLOAT,
                 predicted_low FLOAT,
                 predicted_close FLOAT,
+                predicted_return_open FLOAT,
+                predicted_return_high FLOAT,
+                predicted_return_low FLOAT,
+                predicted_return_close FLOAT,
                 direction INTEGER,
                 confidence FLOAT,
                 model_name TEXT,
@@ -296,6 +329,10 @@ def save_predictions_to_db(predictions, df_test):
                 actual_high FLOAT,
                 actual_low FLOAT,
                 actual_close FLOAT,
+                actual_return_open FLOAT,
+                actual_return_high FLOAT,
+                actual_return_low FLOAT,
+                actual_return_close FLOAT,
                 actual_direction INTEGER
             )
         """))
