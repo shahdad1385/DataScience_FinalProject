@@ -151,73 +151,88 @@ def extract_text_stats(df):
 # 3. KEYWORD EXTRACTION (dynamic — finds keywords from data)
 # =============================================================================
 
-def extract_keywords_w2v(df, w2v_model, top_n=5, max_keywords=500):
+def _keyword_counts_to_frame(df, all_keywords, max_keywords, vocab):
+    """Turn per-article keyword lists into per-(ticker, date) count columns.
+
+    `vocab` pins the column set. It is derived on train and then reused for val
+    and test: each split otherwise selects its own top-N keywords from its own
+    articles (train sees 2,587 articles, val only 40), so the same feature index
+    meant different words in different splits and most train columns simply did
+    not exist downstream. That was the source of the "58.6% of feature columns
+    missing and zero-filled" warnings.
+
+    Returns (frame, vocab_used).
+    """
+    records = []
+    for i, kws in enumerate(all_keywords):
+        row = {"date": df.iloc[i]["date"], "ticker": df.iloc[i]["ticker"]}
+        for kw in kws:
+            safe = f"kw_{kw.replace(' ', '_')}"
+            row[safe] = row.get(safe, 0) + 1
+        records.append(row)
+
+    result = pd.DataFrame(records)
+    if result.empty:
+        result = df[["ticker", "date"]].copy()
+
+    if vocab is None:
+        # Training pass: choose the vocabulary and hand it back to be saved.
+        kw_cols = [c for c in result.columns if c.startswith("kw_")]
+        if kw_cols and len(kw_cols) > max_keywords:
+            freq = result[kw_cols].sum().sort_values(ascending=False)
+            kw_cols = list(freq.head(max_keywords).index)
+            result = result.drop(columns=[c for c in result.columns
+                                          if c.startswith("kw_") and c not in kw_cols])
+        vocab = sorted(kw_cols)
+    else:
+        # Inference pass: force exactly the training columns, in the same order.
+        for c in vocab:
+            if c not in result.columns:
+                result[c] = 0
+        extra = [c for c in result.columns
+                 if c.startswith("kw_") and c not in set(vocab)]
+        if extra:
+            result = result.drop(columns=extra)
+        result = result[["ticker", "date"] + list(vocab)]
+
+    agg_cols = [c for c in result.columns if c.startswith("kw_")]
+    if not agg_cols:
+        return df[["ticker", "date"]].drop_duplicates().reset_index(drop=True), vocab
+    return _groupby(result, {c: "sum" for c in agg_cols}), vocab
+
+
+def extract_keywords_w2v(df, w2v_model, top_n=5, max_keywords=500, vocab=None,
+                         return_vocab=False):
     """
     Extract keywords from each article using Word2Vec.
     Compares each word's vector to the document's average vector.
     Returns top_n keywords per article, then counts them per (ticker, date).
-    Keeps only the top max_keywords most frequent keywords as columns.
+
+    `vocab` pins the output columns to the training vocabulary (see
+    _keyword_counts_to_frame). Pass return_vocab=True on the training split to
+    receive (frame, vocab).
     """
     texts = _get_texts(df)
-    all_keywords = []
-    for text in texts:
-        kws = w2v_module.extract_keywords(w2v_model, text, top_n=top_n)
-        all_keywords.append(kws)
-
-    records = []
-    for i, kws in enumerate(all_keywords):
-        row = {"date": df.iloc[i]["date"], "ticker": df.iloc[i]["ticker"]}
-        for kw in kws:
-            safe = kw.replace(" ", "_")
-            row[f"kw_{safe}"] = row.get(f"kw_{safe}", 0) + 1
-        records.append(row)
-
-    result = pd.DataFrame(records)
-    kw_cols = [c for c in result.columns if c.startswith("kw_")]
-    if kw_cols:
-        if len(kw_cols) > max_keywords:
-            freq = result[kw_cols].sum().sort_values(ascending=False)
-            keep = list(freq.head(max_keywords).index)
-            drop = [c for c in kw_cols if c not in keep]
-            result = result.drop(columns=drop)
-        return _groupby(result, {col: "sum" for col in result.columns if col.startswith("kw_")})
-    else:
-        return df[["ticker", "date"]].drop_duplicates().reset_index(drop=True)
+    all_keywords = [w2v_module.extract_keywords(w2v_model, t, top_n=top_n) for t in texts]
+    frame, used = _keyword_counts_to_frame(df, all_keywords, max_keywords, vocab)
+    return (frame, used) if return_vocab else frame
 
 
-def extract_keywords_bert(df, bert_model, top_n=5, max_keywords=500):
+def extract_keywords_bert(df, bert_model, top_n=5, max_keywords=500, vocab=None,
+                          return_vocab=False):
     """
     Extract keywords from each article using BERT.
     Compares each word's BERT embedding to the document embedding.
     Returns top_n keywords per article, then counts them per (ticker, date).
-    Keeps only the top max_keywords most frequent keywords as columns.
+
+    Shares the vocabulary-pinning logic with the Word2Vec variant so val/test
+    produce the same columns as train.
     """
     bert_module = _bert()
     texts = _get_texts(df)
-    all_keywords = []
-    for text in texts:
-        kws = bert_module.extract_keywords(bert_model, text, top_n=top_n)
-        all_keywords.append(kws)
-
-    records = []
-    for i, kws in enumerate(all_keywords):
-        row = {"date": df.iloc[i]["date"], "ticker": df.iloc[i]["ticker"]}
-        for kw in kws:
-            safe = kw.replace(" ", "_")
-            row[f"kw_{safe}"] = row.get(f"kw_{safe}", 0) + 1
-        records.append(row)
-
-    result = pd.DataFrame(records)
-    kw_cols = [c for c in result.columns if c.startswith("kw_")]
-    if kw_cols:
-        if len(kw_cols) > max_keywords:
-            freq = result[kw_cols].sum().sort_values(ascending=False)
-            keep = list(freq.head(max_keywords).index)
-            drop = [c for c in kw_cols if c not in keep]
-            result = result.drop(columns=drop)
-        return _groupby(result, {col: "sum" for col in result.columns if col.startswith("kw_")})
-    else:
-        return df[["ticker", "date"]].drop_duplicates().reset_index(drop=True)
+    all_keywords = [bert_module.extract_keywords(bert_model, t, top_n=top_n) for t in texts]
+    frame, used = _keyword_counts_to_frame(df, all_keywords, max_keywords, vocab)
+    return (frame, used) if return_vocab else frame
 
 
 # =============================================================================
