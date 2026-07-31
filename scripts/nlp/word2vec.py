@@ -9,7 +9,7 @@ import re
 import numpy as np
 from gensim.models import Word2Vec
 
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
 
 
 def tokenize(text):

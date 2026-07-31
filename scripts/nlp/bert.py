@@ -16,7 +16,7 @@ try:
 except ImportError:
     HAS_SENTENCE_TRANSFORMERS = False
 
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
 
 DEFAULT_MODEL = "all-MiniLM-L6-v2"
 DEFAULT_PCA_DIM = 50

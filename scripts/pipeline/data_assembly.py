@@ -152,7 +152,7 @@ def load_split_features(split):
 
 
 KW_SELECTION_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "kw_selection.pkl"
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models", "kw_selection.pkl"
 )
 # Keyword columns kept per source table. The raw tables carry ~500 each, and the
 # news tiering (nvda / industry / peer) would triple that to ~3,000 columns
@@ -547,7 +547,7 @@ def add_targets(df, horizon=HORIZON):
 
 
 SCHEMA_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "joint_schema.pkl"
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models", "joint_schema.pkl"
 )
 
 
@@ -677,10 +677,10 @@ def create_sequences(X, y_reg, y_cls, seq_len=SEQ_LEN, groups=None):
 
 
 FEATURE_SCALER_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "feature_scaler.pkl"
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models", "feature_scaler.pkl"
 )
 TARGET_SCALER_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "target_scaler.pkl"
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models", "target_scaler.pkl"
 )
 
 

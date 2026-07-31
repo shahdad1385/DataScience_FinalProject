@@ -25,7 +25,7 @@ from ..tabular import pipe as tab_pipe
 from ..clustering import cluster
 from ..activations import DEFAULT_ACTIVATION
 
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
 
 
 def log_mlflow_metrics(results, prefix):

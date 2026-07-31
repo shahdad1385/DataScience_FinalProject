@@ -19,7 +19,7 @@ from . import dbscan
 from . import hierarchical
 from .compare import evaluate, compare
 
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
 
 # Clustering runs over the whole sector's news, matching nlp.extract. The old
 # five-name list also excluded the industry sentinel, so a split made up of

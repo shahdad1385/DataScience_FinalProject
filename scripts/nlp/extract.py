@@ -81,7 +81,7 @@ PEER_TICKERS = [
     "KLAC", "LRCX", "MRVL", "NXPI", "ON", "META", "SMCI", "VRT", "ARM", "MOD",
 ]
 TICKERS = [TARGET_TICKER] + PEER_TICKERS
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
 
 
 def save_nlp_models(models):

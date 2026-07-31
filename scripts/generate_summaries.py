@@ -21,7 +21,7 @@ from sqlalchemy import text
 
 try:
     from dotenv import load_dotenv
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     load_dotenv(os.path.join(project_root, ".env"))
 except ImportError:
     pass

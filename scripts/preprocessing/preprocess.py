@@ -18,7 +18,7 @@ VAL_RATIO = 0.15
 
 # Scalers are persisted here so predictions (which are produced in scaled
 # space) can be inverse-transformed back to real dollar prices.
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
 SCALERS_DIR = os.path.join(MODELS_DIR, "scalers")
 
 

@@ -24,7 +24,7 @@ OHLC = ["open", "high", "low", "close"]
 
 def load_models():
     """Load all trained models from disk."""
-    models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+    models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
 
     models = {}
 

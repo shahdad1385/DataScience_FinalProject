@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 BASE_DIR = os.getcwd()
 DB_PATH = os.path.join(BASE_DIR, "data_samples", "caf_database.db")
 if not os.path.exists(DB_PATH):
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     DB_PATH = os.path.join(BASE_DIR, "data_samples", "caf_database.db")
 
 engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)

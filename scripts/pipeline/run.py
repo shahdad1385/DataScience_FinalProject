@@ -38,7 +38,7 @@ def run_clustering():
     engine = get_engine()
 
     w2v_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "models", "word2vec.model"
     )
     if os.path.exists(w2v_path):

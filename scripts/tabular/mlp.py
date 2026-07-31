@@ -16,7 +16,7 @@ from .regress import evaluate_regression
 from .classify import evaluate_classification
 from ..activations import get_activation, DEFAULT_ACTIVATION
 
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
 
 
 def _build_stack(input_size, hidden_sizes, dropout, output_size, activation):

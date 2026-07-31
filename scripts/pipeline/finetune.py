@@ -186,7 +186,7 @@ def finetune_all(trials=50, model_filter=None, verbose=False, skip_nlp=False):
             print(f"  Best params: {study.best_params}")
 
         # Save best params
-        params_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+        params_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
         os.makedirs(params_dir, exist_ok=True)
         with open(os.path.join(params_dir, "best_hyperparams.pkl"), "wb") as f:
             pickle.dump(best_params, f)

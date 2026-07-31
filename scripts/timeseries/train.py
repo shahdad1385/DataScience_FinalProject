@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.cuda.amp import autocast, GradScaler
 
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "models")
 
 
 def get_device():

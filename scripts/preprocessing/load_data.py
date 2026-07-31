@@ -10,7 +10,7 @@ Base = declarative_base()
 
 engine = get_engine()
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data_samples")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data_samples")
 LLM_SUMMARY_CACHE = os.path.join(DATA_DIR, "_cache", "llm_summaries.csv")
 
 
