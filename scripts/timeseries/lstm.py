@@ -7,9 +7,12 @@ Multi-output: regression (OHLC × 5 tickers = 20) + classification (direction ×
 import torch
 import torch.nn as nn
 
+from ..activations import get_activation, DEFAULT_ACTIVATION
+
 
 class StockLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size=128, num_layers=2, dropout=0.2, n_tickers=5):
+    def __init__(self, input_size, hidden_size=128, num_layers=2, dropout=0.2, n_tickers=5,
+                 activation=DEFAULT_ACTIVATION):
         """
         Args:
             input_size: number of input features per timestep
@@ -17,6 +20,7 @@ class StockLSTM(nn.Module):
             num_layers: number of LSTM layers
             dropout: dropout between LSTM layers
             n_tickers: number of tickers to predict
+            activation: activation for the shared dense layer
         """
         super().__init__()
         self.lstm = nn.LSTM(
@@ -24,11 +28,14 @@ class StockLSTM(nn.Module):
             batch_first=True, dropout=dropout if num_layers > 1 else 0,
         )
         self.shared_fc = nn.Linear(hidden_size, 128)
-        self.relu = nn.ReLU()
+        # LayerNorm keeps the shared representation well-scaled; with ~1300 input
+        # features the pre-activation magnitudes vary a lot between batches.
+        self.norm = nn.LayerNorm(128)
+        self.act = get_activation(activation)
         self.dropout = nn.Dropout(dropout)
-        # Regression head: OHLC × n_tickers
+        # Regression head: OHLC returns × n_tickers
         self.reg_head = nn.Linear(128, n_tickers * 4)
-        # Classification head: direction × n_tickers (sigmoid applied in forward)
+        # Classification head: direction × n_tickers (logits; sigmoid in loss)
         self.cls_head = nn.Linear(128, n_tickers)
 
     def forward(self, x):
@@ -36,18 +43,18 @@ class StockLSTM(nn.Module):
         Args:
             x: (batch, seq_len, input_size)
         Returns:
-            reg: (batch, n_tickers * 4) — OHLC predictions
-            cls: (batch, n_tickers) — direction probabilities (0-1)
+            reg: (batch, n_tickers * 4) — predicted next-day returns
+            cls: (batch, n_tickers) — direction logits
         """
         lstm_out, _ = self.lstm(x)
         last = lstm_out[:, -1, :]  # take last timestep
-        shared = self.relu(self.shared_fc(last))
-        shared = self.dropout(shared)
+        shared = self.dropout(self.act(self.norm(self.shared_fc(last))))
         reg = self.reg_head(shared)
         cls = self.cls_head(shared)
         return reg, cls
 
 
-def create_model(input_size, hidden_size=128, num_layers=2, dropout=0.2, n_tickers=5):
+def create_model(input_size, hidden_size=128, num_layers=2, dropout=0.2, n_tickers=5,
+                 activation=DEFAULT_ACTIVATION):
     """Factory function to create LSTM model."""
-    return StockLSTM(input_size, hidden_size, num_layers, dropout, n_tickers)
+    return StockLSTM(input_size, hidden_size, num_layers, dropout, n_tickers, activation)
